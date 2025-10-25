@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.stats import poisson
+import math
 from typing import Dict, Tuple, Optional
 import logging
 from config import config
@@ -40,6 +40,24 @@ class GoalPredictor:
             'top_half': {'attack_home': 1.15, 'attack_away': 0.95, 'defense_home': 0.88, 'defense_away': 1.05},
             'bottom_half': {'attack_home': 0.92, 'attack_away': 0.75, 'defense_home': 1.12, 'defense_away': 1.28}
         }
+    
+    def _poisson_pmf(self, k: int, lam: float) -> float:
+        """
+        Implementação manual da Probability Mass Function de Poisson
+        P(X = k) = (λ^k * e^(-λ)) / k!
+        """
+        if lam <= 0:
+            return 0.0 if k > 0 else 1.0
+        
+        if k < 0:
+            return 0.0
+        
+        try:
+            factorial_k = math.factorial(k)
+            return (lam ** k * math.exp(-lam)) / factorial_k
+        except (OverflowError, ValueError):
+            # Para valores muito grandes, usar aproximação ou retornar 0
+            return 0.0
     
     def classify_team_tier(self, team_name: str, league_position: Optional[int] = None) -> str:
         """Classifica equipa em tier baseado no nome e posição na tabela"""
@@ -202,7 +220,7 @@ class GoalPredictor:
         
         for h in range(max_goals + 1):
             for a in range(max_goals + 1):
-                prob_matrix[h, a] = poisson.pmf(h, home_goals) * poisson.pmf(a, away_goals)
+                prob_matrix[h, a] = self._poisson_pmf(h, home_goals) * self._poisson_pmf(a, away_goals)
         
         # Normalizar para garantir soma = 1
         total_prob = np.sum(prob_matrix)
@@ -337,7 +355,7 @@ class GoalPredictor:
         total_prob = 0
         
         for goals in range(max_goals + 1):
-            prob = poisson.pmf(goals, expected_goals)
+            prob = self._poisson_pmf(goals, expected_goals)
             distribution[goals] = float(prob)
             total_prob += prob
         
