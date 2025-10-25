@@ -6,12 +6,29 @@ import functools
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union, Any, Tuple
-from scipy.stats import poisson
 from config import config
 
 logger = logging.getLogger(__name__)
 
 # ===== MATHEMATICAL UTILITIES =====
+
+def _poisson_pmf(k: int, lam: float) -> float:
+    """
+    Implementação manual da Probability Mass Function de Poisson
+    P(X = k) = (λ^k * e^(-λ)) / k!
+    """
+    if lam <= 0:
+        return 0.0 if k > 0 else 1.0
+    
+    if k < 0:
+        return 0.0
+    
+    try:
+        factorial_k = math.factorial(k)
+        return (lam ** k * math.exp(-lam)) / factorial_k
+    except (OverflowError, ValueError):
+        # Para valores muito grandes, retornar 0
+        return 0.0
 
 def kelly_fraction(prob: float, odds: float) -> float:
     """
@@ -40,7 +57,7 @@ def poisson_matrix(home_lambda: float, away_lambda: float, max_goals: int = 6) -
     mat = np.zeros((max_goals + 1, max_goals + 1), dtype=float)
     for h in range(max_goals + 1):
         for a in range(max_goals + 1):
-            mat[h, a] = poisson.pmf(h, home_lambda) * poisson.pmf(a, away_lambda)
+            mat[h, a] = _poisson_pmf(h, home_lambda) * _poisson_pmf(a, away_lambda)
     
     # Normalizar
     total = mat.sum()
