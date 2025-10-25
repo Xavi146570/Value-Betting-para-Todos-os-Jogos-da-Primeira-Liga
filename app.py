@@ -256,4 +256,207 @@ class PrimeiraLigaBot:
                     stake_amount=bet['stake_amount'],
                     expected_value=bet['expected_value'],
                     pattern_type=bet.get('pattern_type'),
-                    pattern_explanation=bet.get('pattern_explanation<span class="cursor">█</span>
+                    pattern_explanation=bet.get('pattern_explanation')
+                )
+                db.add(value_bet)
+            
+            db.commit()
+            logger.info(f"Salvos {len(value_bets)} value bets na base de dados")
+            
+        except Exception as e:
+            logger.error(f"Erro ao salvar value bets: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    async def _send_analysis_results(self, matches_analyzed: int, value_bets: List[Dict]):
+        """Envia resultados para Telegram"""
+        try:
+            if not value_bets:
+                await telegram_service.send_daily_summary({
+                    'matches_analyzed': matches_analyzed,
+                    'value_bets_found': 0,
+                    'avg_edge': 0
+                })
+                return
+            
+            # Enviar resumo
+            avg_edge = sum(bet['edge_pct'] for bet in value_bets) / len(value_bets)
+            await telegram_service.send_daily_summary({
+                'matches_analyzed': matches_analyzed,
+                'value_bets_found': len(value_bets),
+                'avg_edge': avg_edge
+            })
+            
+            # Enviar alertas individuais (máximo 8)
+            for bet in value_bets[:8]:
+                success = await telegram_service.send_value_bet_alert(bet)
+                if success:
+                    # Marcar como enviado na base de dados
+                    db = next(get_db())
+                    try:
+                        value_bet = db.query(ValueBet).filter(
+                            ValueBet.match_api_id == bet['fixture_id'],
+                            ValueBet.market == bet['market']
+                        ).first()
+                        if value_bet:
+                            value_bet.sent_telegram = True
+                            db.commit()
+                    except Exception as e:
+                        logger.error(f"Erro ao marcar como enviado: {e}")
+                    finally:
+                        db.close()
+                
+                await asyncio.sleep(3)  # Pausa entre mensagens
+                
+        except Exception as e:
+            logger.error(f"Erro ao enviar resultados: {e}")
+
+# Instância global do bot
+bot = PrimeiraLigaBot()
+
+# Rotas da API
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    status = "🟡 ANALISANDO" if bot.is_running else "🟢 ONLINE"
+    last_analysis = bot.last_analysis.strftime("%d/%m/%Y %H:%M") if bot.last_analysis else "Nunca"
+    
+    return f"""
+    <html>
+        <head>
+            <title>Primeira Liga Value Bot</title>
+            <meta charset="UTF-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+                .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }}
+                .status {{ font-size: 24px; margin: 20px 0; padding: 15px; border-radius: 5px; }}
+                .online {{ background: #d4edda; color: #155724; }}
+                .analyzing {{ background: #fff3cd; color: #856404; }}
+                .info {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+                .endpoint {{ background: #e9ecef; padding: 10px; margin: 5px 0; border-radius: 5px; }}
+                a {{ color: #007bff; text-decoration: none; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🏆 Primeira Liga Value Bot</h1>
+                <div class="status {'online' if not bot.is_running else 'analyzing'}">
+                    Status: {status}
+                </div>
+                <div class="info">
+                    <p><strong>📊 Última Análise:</strong> {last_analysis}</p>
+                    <p><strong>🔢 Análises Realizadas:</strong> {bot.analysis_count}</p>
+                    <p><strong>🏆 Liga:</strong> Primeira Liga (ID: {config.LEAGUE_ID})</p>
+                    <p><strong>📅 Época:</strong> {config.SEASON}</p>
+                    <p><strong>📈 Edge Mínimo:</strong> {config.MIN_EDGE*100}%</p>
+                    <p><strong>💰 Bankroll:</strong> €{config.BANKROLL:,.0f}</p>
+                </div>
+                <h2>🔗 Endpoints Disponíveis:</h2>
+                <div class="endpoint"><strong>GET</strong> <a href="/analyze">/analyze</a> - Executar análise manual</div>
+                <div class="endpoint"><strong>GET</strong> <a href="/status">/status</a> - Status detalhado (JSON)</div>
+                <div class="endpoint"><strong>GET</strong> <a href="/health">/health</a> - Health check</div>
+                <div class="endpoint"><strong>GET</strong> <a href="/value-bets">/value-bets</a> - Últimos value bets encontrados</div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.get("/analyze")
+async def manual_analysis(background_tasks: BackgroundTasks):
+    """Trigger análise manual"""
+    if bot.is_running:
+        return {"message": "Análise já em execução", "status": "running"}
+    
+    background_tasks.add_task(bot.analyze_matches)
+    return {"message": "Análise iniciada em background", "status": "started"}
+
+@app.get("/status")
+async def get_status():
+    """Status detalhado do sistema"""
+    return {
+        "status": "running" if bot.is_running else "idle",
+        "last_analysis": bot.last_analysis,
+        "analysis_count": bot.analysis_count,
+        "config": {
+            "league_id": config.LEAGUE_ID,
+            "season": config.SEASON,
+            "min_edge": config.MIN_EDGE,
+            "bankroll": config.BANKROLL,
+            "max_stake_pct": config.MAX_STAKE_PCT,
+            "kelly_fraction": config.KELLY_FRACTION
+        }
+    }
+
+@app.get("/value-bets")
+async def get_recent_value_bets(limit: int = 20):
+    """Retorna os value bets mais recentes"""
+    db = next(get_db())
+    try:
+        value_bets = db.query(ValueBet).order_by(ValueBet.created_at.desc()).limit(limit).all()
+        return [{
+            "id": bet.id,
+            "match": f"{bet.home_team_name} vs {bet.away_team_name}",
+            "match_date": bet.match_date,
+            "market": bet.market,
+            "odds": bet.odds,
+            "edge": f"{bet.edge*100:.2f}%",
+            "confidence": f"{bet.confidence*100:.0f}%",
+            "stake": f"€{bet.stake_amount:.0f}",
+            "expected_value": f"€{bet.expected_value:.2f}",
+            "pattern": bet.pattern_type,
+            "sent_telegram": bet.sent_telegram,
+            "created_at": bet.created_at
+        } for bet in value_bets]
+    finally:
+        db.close()
+
+@app.get("/health")
+async def health_check():
+    """Health check para Render"""
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.now(),
+        "version": "1.0.0",
+        "bot_running": bot.is_running
+    }
+
+# Configurar scheduler
+@app.on_event("startup")
+async def startup():
+    """Configurar análises automáticas"""
+    
+    # Análise diária às 09:00 e 18:00
+    scheduler.add_job(
+        lambda: asyncio.create_task(bot.analyze_matches()),
+        CronTrigger(hour=9, minute=0),
+        id='morning_analysis',
+        misfire_grace_time=300
+    )
+    
+    scheduler.add_job(
+        lambda: asyncio.create_task(bot.analyze_matches()),
+        CronTrigger(hour=18, minute=0),
+        id='evening_analysis',
+        misfire_grace_time=300
+    )
+    
+    scheduler.start()
+    logger.info("🚀 Bot iniciado com análises automáticas às 09:00 e 18:00")
+    
+    # Enviar mensagem de inicialização
+    await telegram_service.send_system_status(
+        "online", 
+        f"🚀 Bot iniciado com sucesso!\n📊 Análises automáticas: 09:00 e 18:00\n🏆 Liga: {config.LEAGUE_ID} | Época: {config.SEASON}"
+    )
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Cleanup ao desligar"""
+    scheduler.shutdown()
+    logger.info("Bot desligado")
+    await telegram_service.send_system_status("offline", "🔴 Bot desligado")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level=config.LOG_LEVEL.lower())
