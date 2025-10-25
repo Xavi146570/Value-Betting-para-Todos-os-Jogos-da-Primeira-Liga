@@ -463,17 +463,18 @@ if __name__ == "__main__":
     import os
     import uvicorn
     
-    # Ler PORT do ambiente Railway, com fallback seguro para 8000
-    port = int(os.environ.get("PORT", "8000"))
+    # Ler porta do Railway com fallback seguro
+    port = int(os.environ.get("PORT", 8000))
     
-    print(f"🚀 Iniciando servidor na porta {port}")
-    print(f"🌐 Aplicação disponível em: http://0.0.0.0:{port}")
+    print(f"🚀 Iniciando Bot Primeira Liga na porta {port}")
+    print(f"🌐 URL: http://0.0.0.0:{port}")
+    print(f"📊 Health: http://0.0.0.0:{port}/health")
     
-    # Iniciar servidor com configurações otimizadas
+    # Configuração otimizada do uvicorn
     uvicorn.run(
         "app:app",
-        host="0.0.0.0", 
+        host="0.0.0.0",
         port=port,
-        log_level=config.LOG_LEVEL.lower(),
+        log_level="info",
         access_log=True
     )
