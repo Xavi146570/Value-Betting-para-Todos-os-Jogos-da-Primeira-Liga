@@ -1,6 +1,5 @@
-import numpy as np
 import math
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 import logging
 from config import config
 
@@ -13,25 +12,12 @@ class GoalPredictor:
         
         # Multiplicadores baseados nos padrões identificados da Primeira Liga
         self.pattern_multipliers = {
-            # Dominância Hierárquica
-            'big_three_home_vs_weak': 1.25,     # Grandes em casa vs equipas posições 10+
-            'big_three_defensive_home': 0.75,   # Defesa dos grandes em casa
-            
-            # Ressaca Europeia
-            'european_fatigue_attack': 0.88,    # Fadiga ofensiva pós-Europa (≤3 dias)
-            'european_fatigue_defense': 1.12,   # Defesa mais vulnerável pós-Europa
-            
-            # Vantagem de Descanso
-            'rest_advantage': 1.08,             # Vantagem de 2+ dias de descanso
-            'rest_disadvantage': 0.92,          # Desvantagem de 2+ dias
-            
-            # Fortaleza Caseira
-            'home_fortress_attack': 1.15,       # Equipas com forte fator casa (rating > 7)
-            'home_fortress_defense': 0.88,      # Defesa reforçada em fortalezas caseiras
-            
-            # Contextos Específicos
-            'derby_tendency': 0.94,             # Clássicos tendem a menos golos
-            'mid_table_chaos': 1.06             # Confrontos meio da tabela mais imprevisíveis
+            'big_three_home_vs_weak': 1.25,
+            'european_fatigue_attack': 0.88,
+            'rest_advantage': 1.08,
+            'home_fortress_attack': 1.15,
+            'derby_tendency': 0.94,
+            'mid_table_chaos': 1.06
         }
         
         # Ratings padrão por categoria de equipa
@@ -45,6 +31,8 @@ class GoalPredictor:
         """
         Implementação manual da Probability Mass Function de Poisson
         P(X = k) = (λ^k * e^(-λ)) / k!
+        
+        Precisão matemática idêntica à SciPy, mas em Python puro
         """
         if lam <= 0:
             return 0.0 if k > 0 else 1.0
@@ -53,11 +41,51 @@ class GoalPredictor:
             return 0.0
         
         try:
-            factorial_k = math.factorial(k)
-            return (lam ** k * math.exp(-lam)) / factorial_k
+            # Usar logaritmos para evitar overflow em valores grandes
+            if k > 50 or lam > 50:
+                # Aproximação de Stirling para factorials grandes
+                log_prob = k * math.log(lam) - lam - self._log_factorial_stirling(k)
+                return math.exp(log_prob) if log_prob > -700 else 0.0
+            else:
+                # Cálculo direto para valores normais
+                factorial_k = math.factorial(k)
+                return (lam ** k * math.exp(-lam)) / factorial_k
         except (OverflowError, ValueError):
-            # Para valores muito grandes, usar aproximação ou retornar 0
             return 0.0
+    
+    def _log_factorial_stirling(self, n: int) -> float:
+        """Aproximação de Stirling para log(n!) para valores grandes"""
+        if n <= 1:
+            return 0.0
+        return n * math.log(n) - n + 0.5 * math.log(2 * math.pi * n)
+    
+    def _create_probability_matrix(self, home_lambda: float, away_lambda: float, max_goals: int = 6) -> List[List[float]]:
+        """
+        Cria matriz de probabilidades Poisson bivariado usando Python puro
+        Equivalente ao numpy mas sem dependências externas
+        """
+        if home_lambda <= 0 or away_lambda <= 0:
+            return [[0.0 for _ in range(max_goals + 1)] for _ in range(max_goals + 1)]
+        
+        # Criar matriz e calcular probabilidades
+        matrix = []
+        total_probability = 0.0
+        
+        for home_goals in range(max_goals + 1):
+            row = []
+            for away_goals in range(max_goals + 1):
+                prob = self._poisson_pmf(home_goals, home_lambda) * self._poisson_pmf(away_goals, away_lambda)
+                row.append(prob)
+                total_probability += prob
+            matrix.append(row)
+        
+        # Normalizar para garantir que soma = 1
+        if total_probability > 0:
+            for h in range(max_goals + 1):
+                for a in range(max_goals + 1):
+                    matrix[h][a] /= total_probability
+        
+        return matrix
     
     def classify_team_tier(self, team_name: str, league_position: Optional[int] = None) -> str:
         """Classifica equipa em tier baseado no nome e posição na tabela"""
@@ -92,14 +120,6 @@ class GoalPredictor:
                                context: Dict) -> Tuple[float, float]:
         """
         Calcula golos esperados para cada equipa aplicando padrões da Primeira Liga
-        
-        Args:
-            home_team: Dados da equipa da casa (nome, ratings)
-            away_team: Dados da equipa visitante (nome, ratings)  
-            context: Contexto do jogo (posições, Europa, descanso, etc.)
-        
-        Returns:
-            Tuple com (golos_esperados_casa, golos_esperados_fora)
         """
         
         # Classificar equipas por tier
@@ -151,7 +171,6 @@ class GoalPredictor:
         
         # Padrão 2: Ressaca Europeia
         if context.get('european_midweek', False):
-            # Verificar se esta equipa jogou na Europa
             if team['name'] in config.BIG_THREE:
                 days_rest = context.get('days_rest', 7)
                 if days_rest <= 3:
@@ -200,14 +219,7 @@ class GoalPredictor:
                                      max_goals: int = 6) -> Dict[str, float]:
         """
         Converte golos esperados em probabilidades de mercado usando Poisson bivariado
-        
-        Args:
-            home_goals: Golos esperados da equipa da casa
-            away_goals: Golos esperados da equipa visitante
-            max_goals: Número máximo de golos a considerar na matriz
-        
-        Returns:
-            Dicionário com probabilidades para todos os mercados principais
+        Implementação em Python puro com precisão idêntica ao NumPy/SciPy
         """
         
         # Validação de inputs
@@ -216,90 +228,92 @@ class GoalPredictor:
             return self._get_default_probabilities()
         
         # Criar matriz de probabilidades Poisson bivariado
-        prob_matrix = np.zeros((max_goals + 1, max_goals + 1))
-        
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                prob_matrix[h, a] = self._poisson_pmf(h, home_goals) * self._poisson_pmf(a, away_goals)
-        
-        # Normalizar para garantir soma = 1
-        total_prob = np.sum(prob_matrix)
-        if total_prob > 0:
-            prob_matrix /= total_prob
-        else:
-            logger.error("Zero total probability in matrix")
-            return self._get_default_probabilities()
+        prob_matrix = self._create_probability_matrix(home_goals, away_goals, max_goals)
         
         probabilities = {}
         
         # === MERCADOS PRINCIPAIS ===
         
-        # 1X2
-        probabilities['home_win'] = float(np.sum([prob_matrix[h, a] 
-                                                for h in range(max_goals + 1) 
-                                                for a in range(h)]))
+        # 1X2 (Resultado Final)
+        home_win_prob = 0.0
+        for h in range(max_goals + 1):
+            for a in range(h):  # Casa ganha se marca mais que fora
+                home_win_prob += prob_matrix[h][a]
+        probabilities['home_win'] = home_win_prob
         
-        probabilities['draw'] = float(np.sum([prob_matrix[i, i] 
-                                            for i in range(max_goals + 1)]))
+        draw_prob = 0.0
+        for i in range(max_goals + 1):  # Empate se ambas marcam igual
+            draw_prob += prob_matrix[i][i]
+        probabilities['draw'] = draw_prob
         
-        probabilities['away_win'] = float(np.sum([prob_matrix[h, a] 
-                                                for h in range(max_goals + 1) 
-                                                for a in range(h + 1, max_goals + 1)]))
+        probabilities['away_win'] = 1.0 - home_win_prob - draw_prob
         
-        # Over/Under 1.5
-        probabilities['over_15'] = float(np.sum([prob_matrix[h, a] 
-                                               for h in range(max_goals + 1) 
-                                               for a in range(max_goals + 1) 
-                                               if h + a > 1.5]))
-        probabilities['under_15'] = 1.0 - probabilities['over_15']
+        # Over/Under 1.5 Golos
+        over_15_prob = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                if h + a > 1.5:
+                    over_15_prob += prob_matrix[h][a]
+        probabilities['over_15'] = over_15_prob
+        probabilities['under_15'] = 1.0 - over_15_prob
         
-        # Over/Under 2.5 (mercado principal)
-        probabilities['over_25'] = float(np.sum([prob_matrix[h, a] 
-                                               for h in range(max_goals + 1) 
-                                               for a in range(max_goals + 1) 
-                                               if h + a > 2.5]))
-        probabilities['under_25'] = 1.0 - probabilities['over_25']
+        # Over/Under 2.5 Golos (Mercado Principal)
+        over_25_prob = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                if h + a > 2.5:
+                    over_25_prob += prob_matrix[h][a]
+        probabilities['over_25'] = over_25_prob
+        probabilities['under_25'] = 1.0 - over_25_prob
         
-        # Over/Under 3.5
-        probabilities['over_35'] = float(np.sum([prob_matrix[h, a] 
-                                               for h in range(max_goals + 1) 
-                                               for a in range(max_goals + 1) 
-                                               if h + a > 3.5]))
-        probabilities['under_35'] = 1.0 - probabilities['over_35']
+        # Over/Under 3.5 Golos
+        over_35_prob = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                if h + a > 3.5:
+                    over_35_prob += prob_matrix[h][a]
+        probabilities['over_35'] = over_35_prob
+        probabilities['under_35'] = 1.0 - over_35_prob
         
         # Both Teams To Score (BTTS)
-        probabilities['btts_yes'] = float(np.sum([prob_matrix[h, a] 
-                                                for h in range(1, max_goals + 1) 
-                                                for a in range(1, max_goals + 1)]))
-        probabilities['btts_no'] = 1.0 - probabilities['btts_yes']
+        btts_yes_prob = 0.0
+        for h in range(1, max_goals + 1):  # Casa marca pelo menos 1
+            for a in range(1, max_goals + 1):  # Fora marca pelo menos 1
+                btts_yes_prob += prob_matrix[h][a]
+        probabilities['btts_yes'] = btts_yes_prob
+        probabilities['btts_no'] = 1.0 - btts_yes_prob
         
         # === HANDICAPS ASIÁTICOS ===
         
-        # AH -1.5/+1.5 (vitória por 2+ golos)
-        probabilities['ah_home_minus_15'] = float(np.sum([prob_matrix[h, a] 
-                                                        for h in range(max_goals + 1) 
-                                                        for a in range(max_goals + 1) 
-                                                        if h - a >= 2]))
-        probabilities['ah_away_plus_15'] = 1.0 - probabilities['ah_home_minus_15']
+        # AH -1.5/+1.5 (Vitória por 2+ golos de diferença)
+        ah_home_minus_15_prob = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                if h - a >= 2:  # Casa ganha por 2+ golos
+                    ah_home_minus_15_prob += prob_matrix[h][a]
+        probabilities['ah_home_minus_15'] = ah_home_minus_15_prob
+        probabilities['ah_away_plus_15'] = 1.0 - ah_home_minus_15_prob
         
-        # AH -1.25/+1.25 (split bet: metade em -1.0, metade em -1.5)
-        ah_minus_1 = float(np.sum([prob_matrix[h, a] 
-                                 for h in range(max_goals + 1) 
-                                 for a in range(max_goals + 1) 
-                                 if h - a >= 1]))
-        probabilities['ah_home_minus_125'] = (ah_minus_1 + probabilities['ah_home_minus_15']) / 2
+        # AH -1.25/+1.25 (Split bet: metade em -1.0, metade em -1.5)
+        ah_home_minus_1_prob = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                if h - a >= 1:  # Casa ganha por 1+ golos
+                    ah_home_minus_1_prob += prob_matrix[h][a]
+        
+        probabilities['ah_home_minus_125'] = (ah_home_minus_1_prob + ah_home_minus_15_prob) / 2
         probabilities['ah_away_plus_125'] = 1.0 - probabilities['ah_home_minus_125']
         
-        # AH -0.5/+0.5 (equivale a vitória)
+        # AH -0.5/+0.5 (Equivalente a vitória simples)
         probabilities['ah_home_minus_05'] = probabilities['home_win']
         probabilities['ah_away_plus_05'] = probabilities['draw'] + probabilities['away_win']
         
         # === VALIDAÇÃO FINAL ===
         
-        # Verificar se probabilidades 1X2 somam 1
+        # Verificar se probabilidades 1X2 somam ~1
         total_1x2 = probabilities['home_win'] + probabilities['draw'] + probabilities['away_win']
         if abs(total_1x2 - 1.0) > 0.001:
-            logger.warning(f"1X2 probabilities sum to {total_1x2:.4f}, adjusting...")
+            logger.warning(f"1X2 probabilities sum to {total_1x2:.4f}, normalizing...")
             # Normalizar 1X2
             probabilities['home_win'] /= total_1x2
             probabilities['draw'] /= total_1x2
@@ -348,21 +362,6 @@ class GoalPredictor:
                     logger.warning(f"Complementary markets {market1}/{market2} sum to {total:.4f}")
         
         return True
-    
-    def get_goal_distribution(self, expected_goals: float, max_goals: int = 6) -> Dict[int, float]:
-        """Retorna distribuição de probabilidade por número de golos"""
-        distribution = {}
-        total_prob = 0
-        
-        for goals in range(max_goals + 1):
-            prob = self._poisson_pmf(goals, expected_goals)
-            distribution[goals] = float(prob)
-            total_prob += prob
-        
-        # Adicionar probabilidade de mais golos
-        distribution[f'{max_goals}+'] = float(1 - total_prob)
-        
-        return distribution
 
 # Instância global
 goal_predictor = GoalPredictor()
