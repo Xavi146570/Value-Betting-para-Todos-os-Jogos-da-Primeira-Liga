@@ -29,5 +29,5 @@ RUN mkdir -p /app/data
 # Expõe porta
 EXPOSE 8000
 
-# CORREÇÃO PRINCIPAL: Usar sh -c para expansão de variáveis
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# MUDANÇA PRINCIPAL: Executar app.py diretamente (Python controla a porta)
+CMD ["python", "app.py"]
