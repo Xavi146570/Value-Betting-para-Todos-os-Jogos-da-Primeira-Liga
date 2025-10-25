@@ -1,5 +1,0 @@
-# Eliminar ficheiros problemáticos
-rm -f Dockerfile railway.json nixpacks.toml build.sh
-
-# Verificar que foram removidos
-ls -la | grep -E "(Dockerfile|railway|nixpacks|build)"  # Deve estar vazio
