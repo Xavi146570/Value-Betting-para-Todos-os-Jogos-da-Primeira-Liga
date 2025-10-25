@@ -3,14 +3,13 @@ import math
 import logging
 import asyncio
 import functools
-import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union, Any, Tuple
 from config import config
 
 logger = logging.getLogger(__name__)
 
-# ===== MATHEMATICAL UTILITIES =====
+# ===== MATHEMATICAL UTILITIES (Python Puro) =====
 
 def _poisson_pmf(k: int, lam: float) -> float:
     """
@@ -27,7 +26,6 @@ def _poisson_pmf(k: int, lam: float) -> float:
         factorial_k = math.factorial(k)
         return (lam ** k * math.exp(-lam)) / factorial_k
     except (OverflowError, ValueError):
-        # Para valores muito grandes, retornar 0
         return 0.0
 
 def kelly_fraction(prob: float, odds: float) -> float:
@@ -48,64 +46,6 @@ def expected_value(prob: float, odds: float, stake_amount: float) -> float:
     if prob <= 0 or odds <= 1.0:
         return 0.0
     return (prob * (odds - 1.0) - (1.0 - prob)) * stake_amount
-
-def poisson_matrix(home_lambda: float, away_lambda: float, max_goals: int = 6) -> np.ndarray:
-    """Cria matriz de probabilidades Poisson bivariado"""
-    if home_lambda <= 0 or away_lambda <= 0:
-        return np.zeros((max_goals + 1, max_goals + 1))
-    
-    mat = np.zeros((max_goals + 1, max_goals + 1), dtype=float)
-    for h in range(max_goals + 1):
-        for a in range(max_goals + 1):
-            mat[h, a] = _poisson_pmf(h, home_lambda) * _poisson_pmf(a, away_lambda)
-    
-    # Normalizar
-    total = mat.sum()
-    if total > 0:
-        mat /= total
-    
-    return mat
-
-def calculate_1x2_from_matrix(mat: np.ndarray) -> Dict[str, float]:
-    """Extrai probabilidades 1X2 da matriz Poisson"""
-    max_goals = mat.shape[0] - 1
-    
-    home_win = float(sum(mat[h, a] for h in range(max_goals + 1) for a in range(h)))
-    draw = float(sum(mat[i, i] for i in range(max_goals + 1)))
-    away_win = 1.0 - home_win - draw
-    
-    # Normalizar para garantir soma = 1
-    total = home_win + draw + away_win
-    if total > 0:
-        return {
-            "home_win": home_win / total,
-            "draw": draw / total, 
-            "away_win": away_win / total
-        }
-    
-    return {"home_win": 1/3, "draw": 1/3, "away_win": 1/3}
-
-def calculate_over_under_from_matrix(mat: np.ndarray, line: float) -> Dict[str, float]:
-    """Calcula probabilidades Over/Under da matriz"""
-    max_goals = mat.shape[0] - 1
-    over_prob = float(sum(mat[h, a] for h in range(max_goals + 1) 
-                         for a in range(max_goals + 1) if (h + a) > line))
-    
-    return {
-        f"over_{line}": over_prob,
-        f"under_{line}": 1.0 - over_prob
-    }
-
-def calculate_btts_from_matrix(mat: np.ndarray) -> Dict[str, float]:
-    """Calcula probabilidades BTTS da matriz"""
-    max_goals = mat.shape[0] - 1
-    btts_yes = float(sum(mat[h, a] for h in range(1, max_goals + 1) 
-                        for a in range(1, max_goals + 1)))
-    
-    return {
-        "btts_yes": btts_yes,
-        "btts_no": 1.0 - btts_yes
-    }
 
 # ===== TEAM NORMALIZATION =====
 
@@ -267,34 +207,6 @@ class OddsHelper:
         return max(min_odds, 1.0 / probability)
     
     @staticmethod
-    def calculate_overround(odds_list: List[float]) -> float:
-        """Calcula overround (margem da casa) de uma lista de odds"""
-        if not odds_list:
-            return 0.0
-        
-        total_prob = sum(1/odds for odds in odds_list if odds > 1.0)
-        return max(0.0, total_prob - 1.0)
-    
-    @staticmethod
-    def remove_overround(odds_list: List[float]) -> List[float]:
-        """Remove overround normalizando probabilidades"""
-        if not odds_list:
-            return odds_list
-        
-        # Converter para probabilidades
-        probs = [1/odds for odds in odds_list if odds > 1.0]
-        if not probs:
-            return odds_list
-        
-        # Normalizar
-        total_prob = sum(probs)
-        if total_prob <= 0:
-            return odds_list
-        
-        normalized_probs = [prob/total_prob for prob in probs]
-        return [max(1.01, 1/prob) for prob in normalized_probs]
-    
-    @staticmethod
     def calculate_edge(model_prob: float, market_odds: float) -> float:
         """Calcula edge (vantagem) sobre as odds de mercado"""
         if market_odds <= 1.0:
@@ -339,18 +251,6 @@ class StakeCalculator:
         stake_amount = bankroll * final_pct
         
         return stake_amount, final_pct
-    
-    @staticmethod
-    def fixed_percentage_stake(bankroll: float, percentage: float) -> float:
-        """Stake de percentagem fixa"""
-        return bankroll * (percentage / 100.0)
-    
-    @staticmethod
-    def calculate_roi(initial_bankroll: float, current_bankroll: float) -> float:
-        """Calcula ROI em percentagem"""
-        if initial_bankroll <= 0:
-            return 0.0
-        return ((current_bankroll - initial_bankroll) / initial_bankroll) * 100.0
 
 # ===== API DATA PROCESSING =====
 
@@ -383,36 +283,6 @@ class APIDataProcessor:
         except (KeyError, TypeError):
             logger.error(f"Erro ao extrair resultado do fixture: {fixture_data}")
             return 'N/A'
-    
-    @staticmethod
-    def extract_xg_from_statistics(stats_data: List[Dict]) -> Tuple[Optional[float], Optional[float]]:
-        """
-        Extrai xG (Expected Goals) das estatísticas
-        Retorna (home_xg, away_xg)
-        """
-        if not stats_data or len(stats_data) != 2:
-            return None, None
-        
-        home_xg = None
-        away_xg = None
-        
-        try:
-            # Assumir que stats_data[0] = casa, stats_data[1] = fora
-            for stat in stats_data[0]['statistics']:
-                if stat['type'] == 'Expected Goals':
-                    home_xg = float(stat['value']) if stat['value'] else None
-                    break
-            
-            for stat in stats_data[1]['statistics']:
-                if stat['type'] == 'Expected Goals':
-                    away_xg = float(stat['value']) if stat['value'] else None
-                    break
-                    
-        except (KeyError, TypeError, ValueError) as e:
-            logger.error(f"Erro ao extrair xG: {e}")
-            return None, None
-        
-        return home_xg, away_xg
     
     @staticmethod
     def calculate_team_form(recent_fixtures: List[Dict], team_id: int) -> float:
@@ -456,108 +326,6 @@ class APIDataProcessor:
         
         return form_score / total_weight if total_weight > 0 else 0.5
 
-# ===== VALIDATION UTILITIES =====
-
-class ValidationHelper:
-    """Utilitários para validação de dados"""
-    
-    @staticmethod
-    def validate_probability(prob: float, field_name: str = "probabilidade") -> bool:
-        """Valida probabilidade (0-1)"""
-        if not isinstance(prob, (int, float)):
-            logger.error(f"{field_name} deve ser numérico: {prob}")
-            return False
-        
-        if not (0.0 <= prob <= 1.0):
-            logger.error(f"{field_name} deve estar entre 0 e 1: {prob}")
-            return False
-        
-        return True
-    
-    @staticmethod
-    def validate_odds(odds: float, field_name: str = "odds") -> bool:
-        """Valida odds (>1.0)"""
-        if not isinstance(odds, (int, float)):
-            logger.error(f"{field_name} devem ser numéricas: {odds}")
-            return False
-        
-        if odds <= 1.0:
-            logger.error(f"{field_name} devem ser > 1.0: {odds}")
-            return False
-        
-        if odds > 1000:
-            logger.warning(f"{field_name} muito altas: {odds}")
-        
-        return True
-    
-    @staticmethod
-    def validate_match_data(match_data: Dict) -> List[str]:
-        """Valida dados de jogo e retorna lista de erros"""
-        errors = []
-        
-        required_fields = ['home_team', 'away_team', 'match_date']
-        for field in required_fields:
-            if field not in match_data or not match_data[field]:
-                errors.append(f"Campo obrigatório em falta: {field}")
-        
-        # Validar equipas diferentes
-        if (match_data.get('home_team') and match_data.get('away_team') and
-            match_data['home_team'] == match_data['away_team']):
-            errors.append("Equipas da casa e visitante devem ser diferentes")
-        
-        return errors
-
-# ===== FORMATTING UTILITIES =====
-
-def format_percentage(value: float, decimal_places: int = 1) -> str:
-    """Formata valor como percentagem"""
-    return f"{value * 100:.{decimal_places}f}%"
-
-def format_currency(value: float, symbol: str = "€") -> str:
-    """Formata valor como moeda"""
-    return f"{symbol}{value:,.2f}"
-
-def clamp(value: float, min_val: float, max_val: float) -> float:
-    """Limita valor entre mínimo e máximo"""
-    return max(min_val, min(max_val, value))
-
-def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> float:
-    """Divisão segura com valor default"""
-    return numerator / denominator if denominator != 0 else default
-
-def truncate_text(text: str, max_length: int = 200, suffix: str = "...") -> str:
-    """Trunca texto se exceder comprimento máximo"""
-    if not text:
-        return ""
-    return text if len(text) <= max_length else text[:max_length - len(suffix)] + suffix
-
-# ===== ASYNC UTILITIES =====
-
-def async_retry(max_retries: int = 3, delay: float = 1.0, exponential_backoff: bool = True):
-    """Decorator para retry automático de funções assíncronas"""
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            last_exception = None
-            
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    last_exception = e
-                    
-                    if attempt < max_retries - 1:
-                        wait_time = delay * (2 ** attempt if exponential_backoff else 1)
-                        logger.warning(f"Tentativa {attempt + 1} falhou para {func.__name__}: {e}. "
-                                     f"Retry em {wait_time}s")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"Todas as {max_retries} tentativas falharam para {func.__name__}")
-            
-            raise last_exception
-        return wrapper
-    return decorator
-
 # ===== INSTÂNCIAS GLOBAIS =====
 
 # Instâncias para uso direto
@@ -566,7 +334,6 @@ datetime_helper = DateTimeHelper()
 odds_helper = OddsHelper()
 stake_calculator = StakeCalculator()
 api_processor = APIDataProcessor()
-validation_helper = ValidationHelper()
 
 # Funções de conveniência
 def normalize_team(team_name: str) -> str:
