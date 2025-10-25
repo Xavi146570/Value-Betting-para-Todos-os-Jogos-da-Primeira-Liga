@@ -1,0 +1,209 @@
+{
+  "metadata": {
+    "league": "Primeira Liga",
+    "season": "2024",
+    "last_updated": "2024-01-01",
+    "description": "Dados base das equipas da Primeira Liga Portuguesa com ratings iniciais calibrados"
+  },
+  "big_three": ["SL Benfica", "FC Porto", "Sporting CP"],
+  "teams": [
+    {
+      "name": "SL Benfica",
+      "aliases": ["Benfica", "Sport Lisboa e Benfica", "S.L. Benfica", "SLB"],
+      "initial_elo": 1850,
+      "attack_home": 1.45,
+      "attack_away": 1.25,
+      "defense_home": 0.68,
+      "defense_away": 0.85,
+      "tier": "big_three"
+    },
+    {
+      "name": "FC Porto",
+      "aliases": ["Porto", "Futebol Clube do Porto", "FCP"],
+      "initial_elo": 1830,
+      "attack_home": 1.42,
+      "attack_away": 1.22,
+      "defense_home": 0.70,
+      "defense_away": 0.88,
+      "tier": "big_three"
+    },
+    {
+      "name": "Sporting CP",
+      "aliases": ["Sporting", "Sporting Clube de Portugal", "SCP"],
+      "initial_elo": 1800,
+      "attack_home": 1.40,
+      "attack_away": 1.20,
+      "defense_home": 0.72,
+      "defense_away": 0.90,
+      "tier": "big_three"
+    },
+    {
+      "name": "SC Braga",
+      "aliases": ["Braga", "Sporting Clube de Braga", "SCB"],
+      "initial_elo": 1650,
+      "attack_home": 1.20,
+      "attack_away": 1.00,
+      "defense_home": 0.90,
+      "defense_away": 1.05,
+      "tier": "top_half"
+    },
+    {
+      "name": "Vitória SC",
+      "aliases": ["Vitória de Guimarães", "Vitoria SC", "Vitória Guimarães", "VSC"],
+      "initial_elo": 1550,
+      "attack_home": 1.10,
+      "attack_away": 0.92,
+      "defense_home": 0.95,
+      "defense_away": 1.08,
+      "tier": "top_half"
+    },
+    {
+      "name": "Boavista FC",
+      "aliases": ["Boavista", "BFC"],
+      "initial_elo": 1480,
+      "attack_home": 1.02,
+      "attack_away": 0.85,
+      "defense_home": 1.05,
+      "defense_away": 1.18,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "Gil Vicente FC",
+      "aliases": ["Gil Vicente", "GVFC"],
+      "initial_elo": 1470,
+      "attack_home": 1.00,
+      "attack_away": 0.83,
+      "defense_home": 1.06,
+      "defense_away": 1.20,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "FC Famalicão",
+      "aliases": ["Famalicão", "FC Famalicao", "FCF"],
+      "initial_elo": 1470,
+      "attack_home": 1.02,
+      "attack_away": 0.84,
+      "defense_home": 1.04,
+      "defense_away": 1.18,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "Moreirense FC",
+      "aliases": ["Moreirense", "MFC"],
+      "initial_elo": 1460,
+      "attack_home": 1.00,
+      "attack_away": 0.82,
+      "defense_home": 1.05,
+      "defense_away": 1.20,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "CD Santa Clara",
+      "aliases": ["Santa Clara", "CDSC"],
+      "initial_elo": 1450,
+      "attack_home": 0.98,
+      "attack_away": 0.80,
+      "defense_home": 1.08,
+      "defense_away": 1.22,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "Casa Pia AC",
+      "aliases": ["Casa Pia", "CPAC"],
+      "initial_elo": 1440,
+      "attack_home": 0.98,
+      "attack_away": 0.80,
+      "defense_home": 1.08,
+      "defense_away": 1.22,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "FC Arouca",
+      "aliases": ["Arouca", "FCA"],
+      "initial_elo": 1430,
+      "attack_home": 0.98,
+      "attack_away": 0.78,
+      "defense_home": 1.10,
+      "defense_away": 1.25,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "GD Estoril Praia",
+      "aliases": ["Estoril", "Estoril Praia", "GDEP"],
+      "initial_elo": 1420,
+      "attack_home": 0.98,
+      "attack_away": 0.78,
+      "defense_home": 1.12,
+      "defense_away": 1.26,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "Rio Ave FC",
+      "aliases": ["Rio Ave", "RAFC"],
+      "initial_elo": 1410,
+      "attack_home": 0.97,
+      "attack_away": 0.78,
+      "defense_home": 1.12,
+      "defense_away": 1.26,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "GD Chaves",
+      "aliases": ["Chaves", "GDC"],
+      "initial_elo": 1400,
+      "attack_home": 0.95,
+      "attack_away": 0.76,
+      "defense_home": 1.14,
+      "defense_away": 1.28,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "FC Vizela",
+      "aliases": ["Vizela", "FCV"],
+      "initial_elo": 1390,
+      "attack_home": 0.94,
+      "attack_away": 0.75,
+      "defense_home": 1.15,
+      "defense_away": 1.30,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "Portimonense SC",
+      "aliases": ["Portimonense", "PSC"],
+      "initial_elo": 1380,
+      "attack_home": 0.94,
+      "attack_away": 0.74,
+      "defense_home": 1.16,
+      "defense_away": 1.30,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "SC Farense",
+      "aliases": ["Farense", "SCF"],
+      "initial_elo": 1400,
+      "attack_home": 0.96,
+      "attack_away": 0.77,
+      "defense_home": 1.12,
+      "defense_away": 1.28,
+      "tier": "bottom_half"
+    },
+    {
+      "name": "CF Estrela da Amadora",
+      "aliases": ["Estrela da Amadora", "Estrela", "CFEA"],
+      "initial_elo": 1400,
+      "attack_home": 0.96,
+      "attack_away": 0.77,
+      "defense_home": 1.12,
+      "defense_away": 1.28,
+      "tier": "bottom_half"
+    }
+  ],
+  "rating_explanations": {
+    "initial_elo": "Rating ELO inicial baseado na performance histórica recente (1200-2000)",
+    "attack_home": "Multiplicador ofensivo em casa (0.5-2.0, média liga = 1.0)",
+    "attack_away": "Multiplicador ofensivo fora (0.5-2.0, média liga = 1.0)",
+    "defense_home": "Multiplicador defensivo em casa (0.5-2.0, valores baixos = melhor defesa)",
+    "defense_away": "Multiplicador defensivo fora (0.5-2.0, valores baixos = melhor defesa)",
+    "tier": "Classificação por força: big_three, top_half, bottom_half"
+  }
+}
