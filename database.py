@@ -1,12 +1,12 @@
 import os
+import logging
+from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
 from config import config
 
-# Criar diretório data se não existir
-os.makedirs('data', exist_ok=True)
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -61,18 +61,93 @@ class ValueBet(Base):
     sent_telegram = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Setup da base de dados com configurações para SQLite
-connect_args = {}
-if config.DATABASE_URL.startswith('sqlite'):
-    connect_args = {"check_same_thread": False}
+def get_writable_database_path():
+    """Encontra um caminho gravável para a base de dados SQLite"""
+    
+    # Tentar caminhos em ordem de preferência
+    candidates = [
+        "/tmp/primeira_liga.db",                    # Sempre gravável no Railway
+        "/app/data/primeira_liga.db",               # Caminho original (se funcionar)
+        os.path.join(os.getcwd(), "data", "primeira_liga.db"),  # Diretório atual
+        ":memory:"                                  # Fallback: base em memória
+    ]
+    
+    for path in candidates:
+        if path == ":memory:":
+            logger.info("🔄 Usando base de dados em memória (dados perdidos no restart)")
+            return f"sqlite:///{path}"
+        
+        try:
+            # Criar diretório se necessário
+            directory = os.path.dirname(path)
+            if directory and directory != "/":
+                os.makedirs(directory, exist_ok=True)
+            
+            # Testar escrita criando ficheiro temporário
+            test_file = f"{path}.test"
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            
+            logger.info(f"✅ Base de dados configurada: {path}")
+            return f"sqlite:///{path}"
+            
+        except Exception as e:
+            logger.debug(f"❌ Caminho {path} não disponível: {e}")
+            continue
+    
+    # Se chegou aqui, usar memória como último recurso
+    logger.warning("⚠️ Usando base de dados em memória como último recurso")
+    return "sqlite:///:memory:"
 
-engine = create_engine(config.DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Configurar URL da base de dados
+try:
+    # Se DATABASE_URL está definida explicitamente, usar
+    if hasattr(config, 'DATABASE_URL') and config.DATABASE_URL and not config.DATABASE_URL.endswith('primeira_liga.db'):
+        DATABASE_URL = config.DATABASE_URL
+        logger.info(f"📊 Usando DATABASE_URL configurada: {DATABASE_URL}")
+    else:
+        # Encontrar caminho automaticamente
+        DATABASE_URL = get_writable_database_path()
+        
+except Exception as e:
+    logger.error(f"❌ Erro ao configurar base de dados: {e}")
+    DATABASE_URL = "sqlite:///:memory:"
+    logger.info("🔄 Fallback para base de dados em memória")
+
+# Configurações de conexão
+connect_args = {}
+if DATABASE_URL.startswith('sqlite'):
+    connect_args = {
+        "check_same_thread": False,
+        "timeout": 20
+    }
+
+# Criar engine e sessão
+try:
+    engine = create_engine(DATABASE_URL, connect_args=connect_args, echo=False)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    logger.info("✅ Engine da base de dados criada com sucesso")
+    
+except Exception as e:
+    logger.error(f"❌ Erro crítico na base de dados: {e}")
+    # Última tentativa: memória
+    DATABASE_URL = "sqlite:///:memory:"
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    logger.info("🆘 Usando base de dados em memória como último recurso")
 
 def create_tables():
-    Base.metadata.create_all(bind=engine)
+    """Cria tabelas da base de dados"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Tabelas da base de dados criadas com sucesso")
+    except Exception as e:
+        logger.error(f"❌ Erro ao criar tabelas: {e}")
+        raise
 
 def get_db():
+    """Obtém sessão da base de dados"""
     db = SessionLocal()
     try:
         yield db
