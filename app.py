@@ -457,6 +457,23 @@ async def shutdown():
     logger.info("Bot desligado")
     await telegram_service.send_system_status("offline", "🔴 Bot desligado")
 
+# ... (todo o código existente do app.py permanece igual) ...
+
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level=config.LOG_LEVEL.lower())
+    
+    # Ler PORT do ambiente Railway, com fallback seguro para 8000
+    port = int(os.environ.get("PORT", "8000"))
+    
+    print(f"🚀 Iniciando servidor na porta {port}")
+    print(f"🌐 Aplicação disponível em: http://0.0.0.0:{port}")
+    
+    # Iniciar servidor com configurações otimizadas
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0", 
+        port=port,
+        log_level=config.LOG_LEVEL.lower(),
+        access_log=True
+    )
