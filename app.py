@@ -55,7 +55,7 @@ class PrimeiraLigaBot:
                 target_date = (datetime.now() + timedelta(days=day_offset)).strftime('%Y-%m-%d')
                 logger.info(f"Analisando jogos de {target_date}")
                 
-                fixtures = await api_client.get_fixtures(date=target_date, status='NS')
+                fixtures = await api_client.get_fixtures(date=target_date)
                 logger.info(f"Encontrados {len(fixtures)} jogos para {target_date}")
                 
                 for fixture in fixtures:
