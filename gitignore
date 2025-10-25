@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+env/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs/Editors
+.vscode/
+.idea/
+*.iml
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+.env.local
+*.env
+
+# Database and data cache
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.csv
+data/*.parquet
+data/*.jsonl
+
+# Cache
+.pytest_cache/
+.cache/
+.ipynb_checkpoints/
+
+# Uvicorn reload artifacts
+*.pid
