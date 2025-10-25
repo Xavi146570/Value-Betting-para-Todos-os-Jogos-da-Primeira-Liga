@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from datetime import datetime
 import logging
 from config import config
