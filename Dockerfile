@@ -1,30 +1,37 @@
-# Usa Python 3.11 estável com bibliotecas de sistema necessárias
-FROM python:3.11-slim-buster
+# Usa Python 3.11 com Debian Bookworm (Debian 12 - mais recente e estável)
+FROM python:3.11-slim-bookworm
 
 # Define diretório de trabalho
 WORKDIR /app
 
-# Instala dependências de sistema necessárias para compilação (se necessário)
-RUN apt-get update && apt-get install -y \
+# Define variáveis de ambiente para otimização
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# Atualiza sistema e instala dependências mínimas necessárias
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
+    libc6-dev \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copia requirements.txt primeiro (para cache Docker eficiente)
+# Copia requirements.txt primeiro (otimização de cache Docker)
 COPY requirements.txt .
 
 # Atualiza pip e instala dependências Python
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copia resto do código
+# Copia resto do código da aplicação
 COPY . .
 
 # Cria diretório para dados persistentes
 RUN mkdir -p /app/data
 
-# Expõe a porta
-EXPOSE $PORT
+# Expõe porta (Railway define automaticamente via $PORT)
+EXPOSE 8000
 
-# Comando de inicialização
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT"]
+# Comando de inicialização com fallback para porta local
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
