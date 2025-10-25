@@ -466,15 +466,22 @@ if __name__ == "__main__":
     # Ler porta do Railway com fallback seguro
     port = int(os.environ.get("PORT", 8000))
     
-    print(f"🚀 Iniciando Bot Primeira Liga na porta {port}")
-    print(f"🌐 URL: http://0.0.0.0:{port}")
-    print(f"📊 Health: http://0.0.0.0:{port}/health")
+    print("=" * 60)
+    print("🏆 BOT PRIMEIRA LIGA - INICIANDO SISTEMA")
+    print("=" * 60)
+    print(f"🚀 Porta: {port}")
+    print(f"🌐 URL Principal: http://0.0.0.0:{port}")
+    print(f"📊 Health Check: http://0.0.0.0:{port}/health")
+    print(f"🎯 Status API: http://0.0.0.0:{port}/status")
+    print(f"📈 Value Bets: http://0.0.0.0:{port}/value-bets")
+    print("=" * 60)
     
-    # Configuração otimizada do uvicorn
+    # Iniciar servidor com configuração otimizada
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
         port=port,
         log_level="info",
-        access_log=True
+        access_log=True,
+        reload=False
     )
