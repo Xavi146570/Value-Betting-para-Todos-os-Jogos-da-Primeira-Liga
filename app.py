@@ -87,67 +87,77 @@ class PrimeiraLigaBot:
             self.is_running = False
     
     async def _analyze_single_match(self, fixture: Dict) -> List[Dict]:
-        """Analisa um jogo específico"""
-        try:
-            fixture_data = fixture['fixture']
-            teams_data = fixture['teams']
-            
-            home_team_id = teams_data['home']['id']
-            away_team_id = teams_data['away']['id']
-            
-            # Obter dados das equipas
-            home_team = await self._get_team_data(home_team_id, teams_data['home']['name'])
-            away_team = await self._get_team_data(away_team_id, teams_data['away']['name'])
-            
-            # Obter contexto do jogo
-            context = await self._get_match_context(home_team_id, away_team_id)
-            
-            # Calcular golos esperados
-            home_goals, away_goals = goal_predictor.calculate_expected_goals(
-                home_team, away_team, context
-            )
-            
-            # Calcular probabilidades dos mercados
-            model_probs = goal_predictor.calculate_market_probabilities(home_goals, away_goals)
-            
-            # Simular odds de mercado (substituir por API real)
-            market_odds = self._simulate_market_odds(model_probs)
-            
-            # Preparar dados do jogo
-            match_data = {
-                'home_team': teams_data['home']['name'],
-                'away_team': teams_data['away']['name'],
-                'home_position': context.get('home_position', 10),
-                'away_position': context.get('away_position', 10),
-                'european_midweek': context.get('european_midweek', False),
-                'match_date': fixture_data['date'][:10],
-                'match_time': fixture_data['date'][11:16],
-                'fixture_id': fixture_data['id']
-            }
-            
-            # Detectar value bets
-            value_bets = value_detector.detect_value_opportunities(
-                match_data, model_probs, market_odds
-            )
-            
-            # Adicionar dados do jogo a cada value bet
-            for bet in value_bets:
-                bet.update({
-                    'home_team': match_data['home_team'],
-                    'away_team': match_data['away_team'],
-                    'match_date': match_data['match_date'],
-                    'match_time': match_data['match_time'],
-                    'fixture_id': fixture_data['id']
-                })
-            
-            # Salvar na base de dados
-            await self._save_value_bets(value_bets)
-            
-            return value_bets
-            
-        except Exception as e:
-            logger.error(f"Erro na análise individual do jogo: {e}")
+    """Analisa APENAS jogos dos 3 grandes com odds justas"""
+    try:
+        fixture_data = fixture['fixture']
+        teams_data = fixture['teams']
+        
+        home_team_name = teams_data['home']['name']
+        away_team_name = teams_data['away']['name']
+        
+        # 🎯 FILTRO CRÍTICO: APENAS JOGOS DOS 3 GRANDES
+        home_is_big = any(big in home_team_name for big in config.BIG_THREE)
+        away_is_big = any(big in away_team_name for big in config.BIG_THREE)
+        
+        if not (home_is_big or away_is_big):
+            logger.debug(f"⏭️ Ignorando: {home_team_name} vs {away_team_name} (sem grandes)")
             return []
+        
+        logger.info(f"🔍 Analisando jogo dos grandes: {home_team_name} vs {away_team_name}")
+        
+        home_team_id = teams_data['home']['id']
+        away_team_id = teams_data['away']['id']
+        
+        # Obter dados das equipas
+        home_team = await self._get_team_data(home_team_id, home_team_name)
+        away_team = await self._get_team_data(away_team_id, away_team_name)
+        
+        # Obter contexto do jogo
+        context = await self._get_match_context(home_team_id, away_team_id)
+        
+        # Calcular golos esperados
+        home_goals, away_goals = goal_predictor.calculate_expected_goals(
+            home_team, away_team, context
+        )
+        
+        # Calcular probabilidades dos mercados
+        model_probs = goal_predictor.calculate_market_probabilities(home_goals, away_goals)
+        
+        # Preparar dados do jogo
+        match_data = {
+            'home_team': home_team_name,
+            'away_team': away_team_name,
+            'home_position': context.get('home_position', 10),
+            'away_position': context.get('away_position', 10),
+            'european_midweek': context.get('european_midweek', False),
+            'match_date': fixture_data['date'][:10],
+            'match_time': fixture_data['date'][11:16],
+            'fixture_id': fixture_data['id'],
+            'home_is_big': home_is_big,
+            'away_is_big': away_is_big
+        }
+        
+        # 🎯 NOVO: Gerar oportunidades com odds justas
+        fair_opportunities = value_detector.generate_fair_odds_analysis(
+            match_data, model_probs
+        )
+        
+        # Adicionar dados do jogo
+        for opportunity in fair_opportunities:
+            opportunity.update({
+                'home_team': match_data['home_team'],
+                'away_team': match_data['away_team'],
+                'match_date': match_data['match_date'],
+                'match_time': match_data['match_time'],
+                'fixture_id': fixture_data['id']
+            })
+        
+        return fair_opportunities
+        
+    except Exception as e:
+        logger.error(f"Erro na análise individual do jogo: {e}")
+        return []
+
     
     async def _get_team_data(self, team_id: int, team_name: str) -> Dict:
         """Obtém dados de uma equipa"""
