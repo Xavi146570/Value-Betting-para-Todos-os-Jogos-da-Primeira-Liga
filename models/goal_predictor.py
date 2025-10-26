@@ -248,32 +248,47 @@ class GoalPredictor:
         
         probabilities['away_win'] = 1.0 - home_win_prob - draw_prob
         
-        # Over/Under 1.5 Golos
-        over_15_prob = 0.0
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                if h + a > 1.5:
-                    over_15_prob += prob_matrix[h][a]
-        probabilities['over_15'] = over_15_prob
-        probabilities['under_15'] = 1.0 - over_15_prob
-        
-        # Over/Under 2.5 Golos (Mercado Principal)
-        over_25_prob = 0.0
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                if h + a > 2.5:
-                    over_25_prob += prob_matrix[h][a]
-        probabilities['over_25'] = over_25_prob
-        probabilities['under_25'] = 1.0 - over_25_prob
-        
-        # Over/Under 3.5 Golos
-        over_35_prob = 0.0
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                if h + a > 3.5:
-                    over_35_prob += prob_matrix[h][a]
-        probabilities['over_35'] = over_35_prob
-        probabilities['under_35'] = 1.0 - over_35_prob
+        def calculate_market_probabilities(self, home_goals: float, away_goals: float,
+                                 max_goals: int = 6) -> Dict[str, float]:
+    """Converte golos esperados em probabilidades - FOCO nos mercados solicitados"""
+    
+    if home_goals <= 0 or away_goals <= 0:
+        return self._get_default_probabilities()
+    
+    prob_matrix = self._create_probability_matrix(home_goals, away_goals, max_goals)
+    probabilities = {}
+    
+    # === MERCADOS SOLICITADOS ===
+    
+    # 1X2 (Resultado Final)
+    home_win_prob = sum(prob_matrix[h][a] for h in range(max_goals + 1) for a in range(h))
+    draw_prob = sum(prob_matrix[i][i] for i in range(max_goals + 1))
+    probabilities['home_win'] = home_win_prob
+    probabilities['draw'] = draw_prob
+    probabilities['away_win'] = 1.0 - home_win_prob - draw_prob
+    
+    # Over/Under 0.5 Golos
+    over_05_prob = sum(prob_matrix[h][a] for h in range(max_goals + 1) 
+                      for a in range(max_goals + 1) if h + a > 0.5)
+    probabilities['over_05'] = over_05_prob
+    probabilities['under_05'] = 1.0 - over_05_prob
+    
+    # Over/Under 1.5 Golos  
+    over_15_prob = sum(prob_matrix[h][a] for h in range(max_goals + 1) 
+                      for a in range(max_goals + 1) if h + a > 1.5)
+    probabilities['over_15'] = over_15_prob
+    probabilities['under_15'] = 1.0 - over_15_prob
+    
+    return probabilities
+
+def _get_default_probabilities(self) -> Dict[str, float]:
+    """Probabilidades padrão focadas nos mercados solicitados"""
+    return {
+        'home_win': 0.45, 'draw': 0.27, 'away_win': 0.28,
+        'over_05': 0.85, 'under_05': 0.15,
+        'over_15': 0.65, 'under_15': 0.35
+    }
+
         
         # Both Teams To Score (BTTS)
         btts_yes_prob = 0.0
