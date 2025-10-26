@@ -577,6 +577,48 @@ app = FastAPI(
 )
 
 # REMOVER as antigas funções @app.on_event("startup") e @app.on_event("shutdown")
+@app.get("/analyze-today")
+async def analyze_today():
+    """Análise forçada do dia de hoje"""
+    if bot.is_running:
+        return {"message": "Análise já em execução", "status": "running"}
+    
+    asyncio.create_task(bot.analyze_matches(days_ahead=1))
+    return {"message": "Análise de hoje iniciada", "status": "started"}
+
+@app.get("/debug-config")
+async def debug_config():
+    """Mostra configuração para debugging"""
+    return {
+        "league_id": getattr(config, 'LEAGUE_ID', 'NÃO DEFINIDO'),
+        "season": getattr(config, 'SEASON', 'NÃO DEFINIDO'),
+        "big_three": getattr(config, 'BIG_THREE', ['Benfica', 'Porto', 'Sporting']),
+        "min_edge": getattr(config, 'MIN_EDGE', 'NÃO DEFINIDO'),
+        "bankroll": getattr(config, 'BANKROLL', 'NÃO DEFINIDO'),
+        "telegram_configured": bool(getattr(config, 'TELEGRAM_BOT_TOKEN', '')),
+        "api_configured": bool(getattr(config, 'API_FOOTBALL_KEY', ''))
+    }
+
+@app.get("/test-odds-simulation")
+async def test_odds_simulation():
+    """Testa a simulação de odds"""
+    test_probs = {
+        'home_win': 0.5,
+        'draw': 0.3,
+        'away_win': 0.2
+    }
+    
+    simulated_odds = bot._simulate_market_odds(test_probs)
+    
+    return {
+        "model_probabilities": test_probs,
+        "fair_odds": {k: round(1/v, 2) for k, v in test_probs.items()},
+        "simulated_market_odds": simulated_odds,
+        "potential_edges": {
+            k: f"{((simulated_odds[k] * test_probs[k]) - 1) * 100:.1f}%"
+            for k in test_probs.keys()
+        }
+    }
 
 
 if __name__ == "__main__":
