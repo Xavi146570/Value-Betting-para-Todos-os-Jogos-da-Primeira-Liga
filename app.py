@@ -33,19 +33,22 @@ create_tables()
 
 class PrimeiraLigaBot:
     def __init__(self):
-        self.is_running = False
-        self.last_analysis = None
-        self.analysis_count = 0
+    self.is_running = False
+    self.last_analysis = None
+    self.analysis_count = 0
+    self.big_three_opportunities: List[Dict] = []  # NOVO
     
     async def analyze_matches(self, days_ahead: int = 3):
-        """Analisa jogos dos próximos dias"""
-        if self.is_running:
-            logger.info("Análise já em execução")
-            return
-        
-        self.is_running = True
-        self.analysis_count += 1
-        logger.info(f"Iniciando análise #{self.analysis_count} para próximos {days_ahead} dias")
+    if self.is_running:
+        logger.info("Análise já em execução")
+        return
+    
+    self.is_running = True
+    self.analysis_count += 1
+    self.big_three_opportunities = []  # NOVO - Limpar lista
+    logger.info(f"Iniciando análise #{self.analysis_count} para próximos {days_ahead} dias")
+    
+    # ... resto do método permanece igual
         
         all_value_bets = []
         matches_analyzed = 0
@@ -90,86 +93,85 @@ class PrimeiraLigaBot:
             )
     
     async def _analyze_single_match(self, fixture: Dict) -> List[Dict]:
-        """Analisa um único jogo e retorna value bets encontrados"""
-        try:
-            fixture_id = fixture['fixture']['id']
-            home_team = fixture['teams']['home']
-            away_team = fixture['teams']['away']
+    try:
+        fixture_id = fixture['fixture']['id']
+        home_team = fixture['teams']['home']
+        away_team = fixture['teams']['away']
+        
+        logger.info(f"🔍 Analisando: {home_team['name']} vs {away_team['name']}")
+        
+        # Verificar se é um dos 3 grandes
+        big_three = getattr(config, 'BIG_THREE', ['Benfica', 'Porto', 'Sporting'])
+        is_big_game = any(
+            bt.lower() in home_team['name'].lower() or bt.lower() in away_team['name'].lower()
+            for bt in big_three
+        )
+        
+        if not is_big_game:
+            logger.info(f"❌ Jogo ignorado (não envolve os 3 grandes)")
+            return []
+        
+        logger.info(f"✅ Jogo dos 3 grandes detectado!")
+        
+        # Obter dados das equipas
+        home_data = await self._get_team_data(home_team['id'], home_team['name'])
+        away_data = await self._get_team_data(away_team['id'], away_team['name'])
+        context = await self._get_match_context(home_team['id'], away_team['id'])
+        
+        # Usar goal_predictor para probabilidades mais precisas
+        model_probs = goal_predictor.predict_match_probs(home_data, away_data, context)
+        market_odds = self._simulate_market_odds(model_probs)
+        
+        fixture_data = {
+            'fixture_id': fixture_id,
+            'home_team': home_team['name'],
+            'away_team': away_team['name'],
+            'match_date': fixture['fixture']['date'][:10],
+            'match_time': fixture['fixture']['date'][11:16],
+            'context': context
+        }
+        
+        # Encontrar value bets
+        value_bets = value_detector.find_value_bets(
+            model_probs=model_probs,
+            market_odds=market_odds,
+            fixture_data=fixture_data
+        )
+        
+        # NOVO: Guardar oportunidade de "odds justas" para 3 grandes (mesmo sem value)
+        if is_big_game:
+            best_market = max(model_probs.items(), key=lambda x: x[1])
+            market_name, prob = best_market
+            fair_odd = round(1.0 / max(0.01, prob), 2)
             
-            logger.info(f"Analisando: {home_team['name']} vs {away_team['name']}")
-            
-            # Verificar se é um dos 3 grandes (com verificação defensiva)
-            big_three = getattr(config, 'BIG_THREE', ['Benfica', 'Porto', 'Sporting CP'])
-            is_big_game = any(
-                bt.lower() in home_team['name'].lower() or bt.lower() in away_team['name'].lower()
-                for bt in big_three
-            )
-            
-            if not is_big_game:
-                logger.info(
-                    f"Jogo ignorado (não envolve os 3 grandes): {home_team['name']} vs {away_team['name']}"
-                )
-                return []
-            
-            # Obter dados das equipas
-            home_data = await self._get_team_data(home_team['id'], home_team['name'])
-            away_data = await self._get_team_data(away_team['id'], away_team['name'])
-            
-            # Obter contexto do jogo
-            context = await self._get_match_context(home_team['id'], away_team['id'])
-            
-            # Calcular probabilidades usando ELO como base
-            elo_home = home_data.get('elo_rating', 1500)
-            elo_away = away_data.get('elo_rating', 1500)
-            
-            # Probabilidades básicas usando diferença ELO
-            elo_diff = elo_home - elo_away + 100  # vantagem casa
-            prob_home = 1 / (1 + 10 ** (-elo_diff / 400))
-            prob_away = 1 / (1 + 10 ** (elo_diff / 400))
-            prob_draw = max(0.01, 1 - prob_home - prob_away)
-            
-            # Normalizar probabilidades
-            total_prob = prob_home + prob_draw + prob_away
-            prob_home /= total_prob
-            prob_draw /= total_prob
-            prob_away /= total_prob
-            
-            model_probs = {
-                'home_win': max(0.05, min(0.85, prob_home)),
-                'draw': max(0.05, min(0.6, prob_draw)),
-                'away_win': max(0.05, min(0.85, prob_away)),
-                'over_25': 0.55,  # valores padrão até integração completa
-                'under_25': 0.45,
-                'btts_yes': 0.6,
-                'btts_no': 0.4
-            }
-            
-            # Simular odds de mercado
-            market_odds = self._simulate_market_odds(model_probs)
-            
-            # Dados do fixture para o value_detector
-            fixture_data = {
+            fair_opportunity = {
                 'fixture_id': fixture_id,
                 'home_team': home_team['name'],
                 'away_team': away_team['name'],
                 'match_date': fixture['fixture']['date'][:10],
                 'match_time': fixture['fixture']['date'][11:16],
-                'context': context
+                'market': market_name,
+                'odds': fair_odd,
+                'model_prob': prob,
+                'market_prob': prob,
+                'edge': 0.0,
+                'confidence': prob,
+                'stake_amount': 0.0,
+                'expected_value': 0.0,
+                'pattern_type': 'Análise 3 Grandes',
+                'pattern_explanation': f'Odds justas calculadas pelo modelo para {market_name}'
             }
-            
-            # Encontrar value bets
-            value_bets = value_detector.find_value_bets(
-                model_probs=model_probs,
-                market_odds=market_odds,
-                fixture_data=fixture_data
-            )
-            
-            return value_bets or []
-            
-        except Exception as e:
-            logger.error(f"Erro ao analisar jogo individual: {e}")
-            logger.error(traceback.format_exc())
-            return []
+            self.big_three_opportunities.append(fair_opportunity)
+        
+        logger.info(f"📊 Value bets encontrados: {len(value_bets)}")
+        return value_bets or []
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao analisar jogo: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
+
     
     async def _get_team_data(self, team_id: int, team_name: str) -> Dict:
         """Obtém dados de uma equipa"""
@@ -320,55 +322,105 @@ class PrimeiraLigaBot:
             db.close()
     
     async def _send_analysis_results(self, matches_analyzed: int, value_bets: List[Dict]):
-        """Envia resultados para Telegram"""
-        try:
-            if not value_bets:
-                await telegram_service.send_daily_summary({
-                    'matches_analyzed': matches_analyzed,
-                    'value_bets_found': 0,
-                    'avg_edge': 0
-                })
-                return
+    """Envia resultados com fallback para odds justas dos 3 grandes"""
+    try:
+        # Se não há value bets mas há análises dos 3 grandes, enviar essas
+        if not value_bets and self.big_three_opportunities:
+            logger.info(f"📤 Enviando análise de odds justas para {len(self.big_three_opportunities)} jogos dos 3 grandes")
             
-            # Calcular média de edge (tratando diferentes formatos)
-            edges = []
-            for bet in value_bets:
-                edge = bet.get('edge', bet.get('edge_pct', 0))
-                if isinstance(edge, (int, float)):
-                    edges.append(edge if edge <= 1 else edge / 100.0)
+            # Agrupar por jogo
+            games = {}
+            for opp in self.big_three_opportunities:
+                key = f"{opp['home_team']} vs {opp['away_team']}"
+                if key not in games:
+                    games[key] = []
+                games[key].append(opp)
             
-            avg_edge = (sum(edges) / len(edges) * 100) if edges else 0
+            # Enviar máximo 2 jogos
+            sent_count = 0
+            for game_key, opportunities in games.items():
+                if sent_count >= 2:
+                    break
+                
+                # Dados do jogo
+                match_data = {
+                    'home_team': opportunities[0]['home_team'],
+                    'away_team': opportunities[0]['away_team'],
+                    'match_date': opportunities[0]['match_date'],
+                    'match_time': opportunities[0]['match_time']
+                }
+                
+                # Enviar análise
+                await telegram_service.send_match_analysis_summary(match_data, opportunities)
+                await asyncio.sleep(2)
+                
+                # Melhor oportunidade
+                best_opp = max(opportunities, key=lambda x: x.get('confidence', 0))
+                await telegram_service.send_fair_odds_alert(best_opp)
+                await asyncio.sleep(2)
+                
+                sent_count += 1
             
+            # Resumo especial para 3 grandes
+            await telegram_service.send_daily_summary({
+                'matches_analyzed': len(games),
+                'value_bets_found': 0,
+                'avg_edge': 0,
+                'focus': '3 Grandes - Odds Justas'
+            })
+            return
+        
+        # Fluxo original para value bets encontrados
+        if not value_bets:
             await telegram_service.send_daily_summary({
                 'matches_analyzed': matches_analyzed,
-                'value_bets_found': len(value_bets),
-                'avg_edge': avg_edge
+                'value_bets_found': 0,
+                'avg_edge': 0
             })
+            return
+        
+        # Calcular edge médio
+        edges = []
+        for bet in value_bets:
+            edge = bet.get('edge', 0)
+            if isinstance(edge, (int, float)):
+                edges.append(edge if edge <= 1 else edge / 100.0)
+        
+        avg_edge = (sum(edges) / len(edges) * 100) if edges else 0
+        
+        # Enviar resumo
+        await telegram_service.send_daily_summary({
+            'matches_analyzed': matches_analyzed,
+            'value_bets_found': len(value_bets),
+            'avg_edge': avg_edge
+        })
+        
+        # Enviar alertas individuais (máximo 8)
+        for bet in value_bets[:8]:
+            success = await telegram_service.send_value_bet_alert(bet)
+            if success:
+                # Marcar como enviado
+                db = next(get_db())
+                try:
+                    value_bet = db.query(ValueBet).filter(
+                        ValueBet.match_api_id == bet['fixture_id'],
+                        ValueBet.market == bet['market']
+                    ).first()
+                    if value_bet:
+                        value_bet.sent_telegram = True
+                        db.commit()
+                except Exception as e:
+                    logger.error(f"Erro ao marcar como enviado: {e}")
+                finally:
+                    db.close()
             
-            # Enviar alertas individuais (máximo 8)
-            for bet in value_bets[:8]:
-                success = await telegram_service.send_value_bet_alert(bet)
-                if success:
-                    # Marcar como enviado na base de dados
-                    db = next(get_db())
-                    try:
-                        value_bet = db.query(ValueBet).filter(
-                            ValueBet.match_api_id == bet['fixture_id'],
-                            ValueBet.market == bet['market']
-                        ).first()
-                        if value_bet:
-                            value_bet.sent_telegram = True
-                            db.commit()
-                    except Exception as e:
-                        logger.error(f"Erro ao marcar como enviado: {e}")
-                    finally:
-                        db.close()
-                
-                await asyncio.sleep(3)  # Pausa entre mensagens
-                
-        except Exception as e:
-            logger.error(f"Erro ao enviar resultados: {e}")
-            logger.error(traceback.format_exc())
+            await asyncio.sleep(3)
+            
+    except Exception as e:
+        logger.error(f"Erro ao enviar resultados: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 
 # Instância global do bot
 bot = PrimeiraLigaBot()
@@ -480,11 +532,14 @@ async def health_check():
     }
 
 # Configurar scheduler
-@app.on_event("startup")
-async def startup():
-    """Configurar análises automáticas"""
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gestão do ciclo de vida da aplicação"""
+    # Startup
+    logger.info("🚀 Iniciando sistema...")
     
-    # Análise diária às 09:00 e 18:00
     scheduler.add_job(
         lambda: asyncio.create_task(bot.analyze_matches()),
         CronTrigger(hour=9, minute=0),
@@ -502,18 +557,27 @@ async def startup():
     scheduler.start()
     logger.info("🚀 Bot iniciado com análises automáticas às 09:00 e 18:00")
     
-    # Enviar mensagem de inicialização
     await telegram_service.send_system_status(
         "online", 
         f"🚀 Bot iniciado com sucesso!\n📊 Análises automáticas: 09:00 e 18:00\n🏆 Liga: {config.LEAGUE_ID} | Época: {config.SEASON}"
     )
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup ao desligar"""
+    
+    yield
+    
+    # Shutdown
     scheduler.shutdown()
     logger.info("Bot desligado")
     await telegram_service.send_system_status("offline", "🔴 Bot desligado")
+
+# Aplicar lifespan ao FastAPI
+app = FastAPI(
+    title="Primeira Liga Value Bot", 
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# REMOVER as antigas funções @app.on_event("startup") e @app.on_event("shutdown")
+
 
 if __name__ == "__main__":
     import os
