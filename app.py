@@ -72,91 +72,60 @@ class PrimeiraLigaBot:
                         logger.error(f"Erro ao analisar jogo {fixture.get('fixture', {}).get('id')}: {e}")
                         logger.error(traceback.format_exc())
             
-            # Enviar resultados
-            await self._send_analysis_results(matches_analyzed, all_value_bets)
             
-            self.last_analysis = datetime.now()
-            logger.info(f"Análise #{self.analysis_count} concluída: {matches_analyzed} jogos, {len(all_value_bets)} value bets")
-            
-        except Exception as e:
-            logger.error(f"Erro crítico na análise: {e}")
-            logger.error(traceback.format_exc())
-            await telegram_service.send_system_status("erro", f"Erro crítico: {str(e)}")
-        
-        finally:
-            self.is_running = False
-    
-    async def _analyze_single_match(self, fixture: Dict) -> List[Dict]:
-    """Analisa APENAS jogos dos 3 grandes com odds justas"""
+async def _send_analysis_results(self, matches_analyzed: int, all_opportunities: List[Dict]):
+    """Envia resultados focados nos 3 grandes com odds justas"""
     try:
-        fixture_data = fixture['fixture']
-        teams_data = fixture['teams']
-        
-        home_team_name = teams_data['home']['name']
-        away_team_name = teams_data['away']['name']
-        
-        # 🎯 FILTRO CRÍTICO: APENAS JOGOS DOS 3 GRANDES
-        home_is_big = any(big in home_team_name for big in config.BIG_THREE)
-        away_is_big = any(big in away_team_name for big in config.BIG_THREE)
-        
-        if not (home_is_big or away_is_big):
-            logger.debug(f"⏭️ Ignorando: {home_team_name} vs {away_team_name} (sem grandes)")
-            return []
-        
-        logger.info(f"🔍 Analisando jogo dos grandes: {home_team_name} vs {away_team_name}")
-        
-        home_team_id = teams_data['home']['id']
-        away_team_id = teams_data['away']['id']
-        
-        # Obter dados das equipas
-        home_team = await self._get_team_data(home_team_id, home_team_name)
-        away_team = await self._get_team_data(away_team_id, away_team_name)
-        
-        # Obter contexto do jogo
-        context = await self._get_match_context(home_team_id, away_team_id)
-        
-        # Calcular golos esperados
-        home_goals, away_goals = goal_predictor.calculate_expected_goals(
-            home_team, away_team, context
-        )
-        
-        # Calcular probabilidades dos mercados
-        model_probs = goal_predictor.calculate_market_probabilities(home_goals, away_goals)
-        
-        # Preparar dados do jogo
-        match_data = {
-            'home_team': home_team_name,
-            'away_team': away_team_name,
-            'home_position': context.get('home_position', 10),
-            'away_position': context.get('away_position', 10),
-            'european_midweek': context.get('european_midweek', False),
-            'match_date': fixture_data['date'][:10],
-            'match_time': fixture_data['date'][11:16],
-            'fixture_id': fixture_data['id'],
-            'home_is_big': home_is_big,
-            'away_is_big': away_is_big
-        }
-        
-        # 🎯 NOVO: Gerar oportunidades com odds justas
-        fair_opportunities = value_detector.generate_fair_odds_analysis(
-            match_data, model_probs
-        )
-        
-        # Adicionar dados do jogo
-        for opportunity in fair_opportunities:
-            opportunity.update({
-                'home_team': match_data['home_team'],
-                'away_team': match_data['away_team'],
-                'match_date': match_data['match_date'],
-                'match_time': match_data['match_time'],
-                'fixture_id': fixture_data['id']
+        if not all_opportunities:
+            await telegram_service.send_daily_summary({
+                'matches_analyzed': matches_analyzed,
+                'value_bets_found': 0,
+                'avg_confidence': 0,
+                'focus': '3 Grandes apenas'
             })
+            return
         
-        return fair_opportunities
+        # Agrupar por jogo
+        games_with_opportunities = {}
+        for opp in all_opportunities:
+            game_key = f"{opp['home_team']} vs {opp['away_team']}"
+            if game_key not in games_with_opportunities:
+                games_with_opportunities[game_key] = []
+            games_with_opportunities[game_key].append(opp)
+        
+        # Enviar análise detalhada por jogo (máximo 2 jogos)
+        for i, (game_key, opportunities) in enumerate(games_with_opportunities.items()):
+            if i >= 2:  # Limitar a 2 jogos por análise
+                break
+            
+            # Dados do primeiro jogo
+            match_data = {
+                'home_team': opportunities[0]['home_team'],
+                'away_team': opportunities[0]['away_team'],
+                'match_date': opportunities[0]['match_date'],
+                'match_time': opportunities[0]['match_time']
+            }
+            
+            # Enviar resumo do jogo
+            await telegram_service.send_match_analysis_summary(match_data, opportunities)
+            await asyncio.sleep(3)
+            
+            # Enviar detalhes da melhor oportunidade
+            best_opportunity = max(opportunities, key=lambda x: x['confidence'])
+            await telegram_service.send_fair_odds_alert(best_opportunity)
+            await asyncio.sleep(3)
+        
+        # Resumo geral
+        avg_confidence = sum(opp['confidence'] for opp in all_opportunities) / len(all_opportunities)
+        await telegram_service.send_daily_summary({
+            'matches_analyzed': len(games_with_opportunities),
+            'value_bets_found': len(all_opportunities),
+            'avg_confidence': avg_confidence * 100,
+            'focus': '3 Grandes + Odds Justas'
+        })
         
     except Exception as e:
-        logger.error(f"Erro na análise individual do jogo: {e}")
-        return []
+        logger.error(f"Erro ao enviar resultados: {e}")
 
     
     async def _get_team_data(self, team_id: int, team_name: str) -> Dict:
