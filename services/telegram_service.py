@@ -1,243 +1,317 @@
 import asyncio
-from telegram import Bot
-from telegram.error import TelegramError, NetworkError, RetryAfter
-from config import config
 import logging
 from typing import Dict, List, Optional
+import aiohttp
 from datetime import datetime
-import traceback
+import os
+
+# Importar config com tratamento de erro
+try:
+    from config import config
+except ImportError:
+    # Fallback para variáveis de ambiente se config não existir
+    class Config:
+        TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+        BANKROLL = float(os.environ.get("BANKROLL", "1000"))
+    config = Config()
 
 logger = logging.getLogger(__name__)
 
 class TelegramService:
     def __init__(self):
-        if not config.TELEGRAM_BOT_TOKEN:
-            logger.error("TELEGRAM_BOT_TOKEN não configurado")
-            self.bot = None
-            self.chat_id = None
-            return
+        self.bot_token = getattr(config, 'TELEGRAM_BOT_TOKEN', '') or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        self.chat_id = getattr(config, 'TELEGRAM_CHAT_ID', '') or os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.session = None
         
-        if not config.TELEGRAM_CHAT_ID:
-            logger.error("TELEGRAM_CHAT_ID não configurado")
-            self.bot = None
-            self.chat_id = None
-            return
-            
-        self.bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-        self.chat_id = str(config.TELEGRAM_CHAT_ID)
-        self.max_retries = 3
-        self.retry_delay = 5
-        
-        logger.info(f"Telegram service initialized for chat {self.chat_id}")
+        # Validar configuração
+        if not self.bot_token:
+            logger.warning("TELEGRAM_BOT_TOKEN não configurado. Mensagens não serão enviadas.")
+        if not self.chat_id:
+            logger.warning("TELEGRAM_CHAT_ID não configurado. Mensagens não serão enviadas.")
     
-    async def _send_with_retry(self, send_func) -> bool:
-        """Envia mensagem com retry logic e tratamento de erros"""
-        if not self.bot or not self.chat_id:
-            logger.error("Telegram não configurado corretamente")
+    async def _get_session(self):
+        """Obtém sessão HTTP reutilizável"""
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=30)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+        return self.session
+    
+    async def _send_message(self, text: str, parse_mode: str = "HTML") -> bool:
+        """Envia mensagem para o Telegram com tratamento de rate-limiting"""
+        if not self.bot_token or not self.chat_id:
+            logger.warning("Telegram não configurado. Mensagem não enviada.")
             return False
         
-        for attempt in range(self.max_retries):
-            try:
-                await send_func()
-                logger.info("Mensagem Telegram enviada com sucesso")
-                return True
+        try:
+            session = await self._get_session()
+            
+            # Truncar mensagem se muito longa (limite Telegram: 4096 caracteres)
+            if len(text) > 4000:
+                text = text[:3950] + "\n\n... (mensagem truncada)"
+            
+            payload = {
+                'chat_id': self.chat_id,
+                'text': text,
+                'parse_mode': parse_mode,
+                'disable_web_page_preview': True
+            }
+            
+            async with session.post(f"{self.base_url}/sendMessage", json=payload) as response:
+                # Tratamento de rate-limiting (HTTP 429)
+                if response.status == 429:
+                    retry_after = 3
+                    try:
+                        error_data = await response.json()
+                        retry_after = error_data.get('parameters', {}).get('retry_after', 3)
+                    except:
+                        pass
+                    
+                    logger.warning(f"Rate limited pelo Telegram. Aguardando {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    
+                    # Tentar novamente
+                    async with session.post(f"{self.base_url}/sendMessage", json=payload) as retry_response:
+                        if retry_response.status == 200:
+                            logger.info("Mensagem enviada com sucesso após retry")
+                            return True
+                        else:
+                            error_text = await retry_response.text()
+                            logger.error(f"Erro após retry: {retry_response.status} - {error_text}")
+                            return False
                 
-            except RetryAfter as e:
-                wait_time = e.retry_after + 1
-                logger.warning(f"Rate limit Telegram, aguardando {wait_time}s")
-                await asyncio.sleep(wait_time)
-                continue
-                
-            except NetworkError as e:
-                logger.error(f"Erro de rede Telegram (tentativa {attempt + 1}): {e}")
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(self.retry_delay * (attempt + 1))
-                    continue
-                return False
-                
-            except TelegramError as e:
-                if "message is too long" in str(e).lower():
-                    logger.error("Mensagem muito longa para Telegram")
-                    return False
-                elif "chat not found" in str(e).lower():
-                    logger.error(f"Chat ID {self.chat_id} não encontrado")
-                    return False
+                elif response.status == 200:
+                    logger.info("Mensagem enviada com sucesso para Telegram")
+                    return True
                 else:
-                    logger.error(f"Erro Telegram (tentativa {attempt + 1}): {e}")
-                    if attempt < self.max_retries - 1:
-                        await asyncio.sleep(self.retry_delay)
-                        continue
+                    error_text = await response.text()
+                    logger.error(f"Erro ao enviar mensagem: {response.status} - {error_text}")
                     return False
                     
-            except Exception as e:
-                logger.error(f"Erro inesperado Telegram (tentativa {attempt + 1}): {e}")
-                logger.error(traceback.format_exc())
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(self.retry_delay)
-                    continue
-                return False
-        
-        logger.error("Todas as tentativas de envio falharam")
-        return False
-    
-    async def send_message(self, text: str, parse_mode: str = 'HTML') -> bool:
-        """Envia mensagem básica para o Telegram"""
-        if not text or not text.strip():
-            logger.warning("Tentativa de enviar mensagem vazia")
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem para Telegram: {e}")
             return False
-        
-        # Truncar mensagem se muito longa
-        if len(text) > 4000:
-            text = text[:3900] + "\n\n⚠️ <i>Mensagem truncada...</i>"
-        
-        async def send_func():
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True
-            )
-        
-        return await self._send_with_retry(send_func)
     
-    async def send_fair_odds_alert(self, opportunity: Dict) -> bool:
-    """Envia análise de odds justas para jogos dos 3 grandes"""
+    def _escape_html(self, text: str) -> str:
+        """Sanitiza texto para HTML do Telegram"""
+        if not text:
+            return ""
+        return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     
-    pattern_emojis = {
-        'Dominancia_Hierarquica': '👑',
-        'Ressaca_Europeia': '😴', 
-        'Fortaleza_Defensiva': '🛡️',
-        'Fortaleza_Caseira': '🏠',
-        'Caos_Meio_Tabela': '⚡'
-    }
+    def _format_percentage(self, value) -> float:
+        """Converte valor para percentagem se necessário"""
+        if isinstance(value, (int, float)):
+            return value * 100 if value <= 1 else value
+        return 0.0
     
-    emoji = pattern_emojis.get(opportunity.get('pattern_type', ''), '🎯')
+    async def send_value_bet_alert(self, bet_data: Dict) -> bool:
+        """Envia alerta de value bet"""
+        try:
+            home_team = self._escape_html(bet_data.get('home_team', 'N/A'))
+            away_team = self._escape_html(bet_data.get('away_team', 'N/A'))
+            market = self._escape_html(bet_data.get('market', 'N/A'))
+            
+            edge_pct = self._format_percentage(bet_data.get('edge', 0))
+            confidence_pct = self._format_percentage(bet_data.get('confidence', 0))
+            
+            message = f"""🚨 <b>VALUE BET DETECTADO</b> 🚨
+
+⚽ <b>Jogo:</b> {home_team} vs {away_team}
+📅 <b>Data:</b> {bet_data.get('match_date', 'N/A')} às {bet_data.get('match_time', 'N/A')}
+
+📊 <b>Mercado:</b> {market}
+💰 <b>Odds:</b> {bet_data.get('odds', 0):.2f}
+📈 <b>Edge:</b> {edge_pct:.1f}%
+🎯 <b>Confiança:</b> {confidence_pct:.0f}%
+
+💵 <b>Stake Sugerido:</b> €{bet_data.get('stake_amount', 0):.0f}
+💎 <b>Valor Esperado:</b> €{bet_data.get('expected_value', 0):.2f}
+
+🔍 <b>Padrão:</b> {self._escape_html(bet_data.get('pattern_type', 'Standard'))}
+📝 <b>Explicação:</b> {self._escape_html(bet_data.get('pattern_explanation', 'Análise estatística padrão'))}"""
+            
+            return await self._send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar alerta de value bet: {e}")
+            return False
     
-    # Identificar qual grande está a jogar
-    home_team = opportunity.get('home_team', '')
-    away_team = opportunity.get('away_team', '')
+    async def send_daily_summary(self, summary_data: Dict) -> bool:
+        """Envia resumo diário da análise"""
+        try:
+            matches_analyzed = summary_data.get('matches_analyzed', 0)
+            value_bets_found = summary_data.get('value_bets_found', 0)
+            avg_edge = summary_data.get('avg_edge', 0)
+            focus = self._escape_html(summary_data.get('focus', 'Análise geral'))
+            
+            bankroll = getattr(config, 'BANKROLL', 1000)
+            
+            if value_bets_found == 0:
+                message = f"""📊 <b>RESUMO DIÁRIO - PRIMEIRA LIGA</b>
+
+🔍 <b>Jogos Analisados:</b> {matches_analyzed}
+🎯 <b>Value Bets Encontrados:</b> {value_bets_found}
+📈 <b>Foco:</b> {focus}
+
+❌ Nenhuma oportunidade encontrada hoje.
+🔄 Próxima análise em algumas horas.
+💰 Bankroll: €{bankroll:,.0f}"""
+            else:
+                message = f"""📊 <b>RESUMO DIÁRIO - PRIMEIRA LIGA</b>
+
+🔍 <b>Jogos Analisados:</b> {matches_analyzed}
+🎯 <b>Value Bets Encontrados:</b> {value_bets_found}
+📈 <b>Edge Médio:</b> {avg_edge:.1f}%
+📊 <b>Foco:</b> {focus}
+
+✅ Alertas individuais enviados acima.
+💰 Bankroll atual: €{bankroll:,.0f}"""
+            
+            return await self._send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar resumo diário: {e}")
+            return False
     
-    big_team = "N/A"
-    for big in ['Benfica', 'Porto', 'Sporting']:
-        if any(big_name in home_team for big_name in [big, f'SL {big}', f'FC {big}', f'{big} CP']):
-            big_team = big
-            break
-        elif any(big_name in away_team for big_name in [big, f'SL {big}', f'FC {big}', f'{big} CP']):
-            big_team = big
-            break
+    async def send_system_status(self, status: str, message: str) -> bool:
+        """Envia status do sistema"""
+        try:
+            status_emoji = {
+                'online': '🟢',
+                'offline': '🔴',
+                'error': '🟡',
+                'maintenance': '🔧'
+            }.get(status.lower(), '⚪')
+            
+            escaped_message = self._escape_html(message)
+            
+            full_message = f"""{status_emoji} <b>SISTEMA - {status.upper()}</b>
+
+{escaped_message}
+
+⏰ <b>Timestamp:</b> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"""
+            
+            return await self._send_message(full_message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar status do sistema: {e}")
+            return False
     
-    message = f"""
-{emoji} <b>ANÁLISE DOS 3 GRANDES</b> 🏆
+    async def send_match_analysis_summary(self, match_data: Dict, opportunities: List[Dict]) -> bool:
+        """Envia resumo de análise de um jogo específico"""
+        try:
+            home_team = self._escape_html(match_data.get('home_team', 'N/A'))
+            away_team = self._escape_html(match_data.get('away_team', 'N/A'))
+            match_date = match_data.get('match_date', 'N/A')
+            match_time = match_data.get('match_time', 'N/A')
+            
+            message = f"""🏆 <b>ANÁLISE DE JOGO - PRIMEIRA LIGA</b>
 
 ⚽ <b>{home_team} vs {away_team}</b>
+📅 <b>Data:</b> {match_date} às {match_time}
+
+🎯 <b>Oportunidades Encontradas:</b> {len(opportunities)}"""
+            
+            # Ordenar por confiança e mostrar as 3 melhores
+            sorted_opps = sorted(opportunities, key=lambda x: x.get('confidence', 0), reverse=True)
+            
+            for i, opp in enumerate(sorted_opps[:3], 1):
+                market = self._escape_html(opp.get('market', 'N/A'))
+                edge_pct = self._format_percentage(opp.get('edge', 0))
+                confidence_pct = self._format_percentage(opp.get('confidence', 0))
+                
+                message += f"""
+
+{i}. <b>{market}</b>
+   Odds: {opp.get('odds', 0):.2f} | Edge: {edge_pct:.1f}% | Confiança: {confidence_pct:.0f}%"""
+            
+            return await self._send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar análise de jogo: {e}")
+            return False
+    
+    async def send_fair_odds_alert(self, opportunity: Dict) -> bool:
+        """Envia análise de odds justas para jogos dos 3 grandes"""
+        try:
+            home_team = self._escape_html(opportunity.get('home_team', 'N/A'))
+            away_team = self._escape_html(opportunity.get('away_team', 'N/A'))
+            market = self._escape_html(opportunity.get('market', 'N/A'))
+            
+            edge_pct = self._format_percentage(opportunity.get('edge', 0))
+            confidence_pct = self._format_percentage(opportunity.get('confidence', 0))
+            
+            model_prob = opportunity.get('model_prob', 0.5)
+            fair_odds = (1 / model_prob) if model_prob > 0 else 0.0
+            
+            pattern_explanation = self._escape_html(
+                opportunity.get('pattern_explanation', 'Odds de mercado acima do valor justo calculado pelo modelo')
+            )
+            
+            message = f"""⭐ <b>ODDS JUSTAS - 3 GRANDES</b> ⭐
+
+⚽ <b>Jogo:</b> {home_team} vs {away_team}
 📅 <b>Data:</b> {opportunity.get('match_date', 'N/A')} às {opportunity.get('match_time', 'N/A')}
-⭐ <b>Grande:</b> {big_team}
 
-💡 <b>MERCADO ANALISADO</b>
-💰 <b>Mercado:</b> {opportunity['market_name']}
-🎯 <b>Probabilidade Modelo:</b> {opportunity['probability_pct']}%
-📊 <b>Odd Justa:</b> {opportunity['fair_odds']}
-🔥 <b>Confiança:</b> {opportunity['confidence']*100:.0f}%
+📊 <b>Mercado:</b> {market}
+💰 <b>Odds de Mercado:</b> {opportunity.get('odds', 0):.2f}
+🎯 <b>Odds Justas (Modelo):</b> {fair_odds:.2f}
+📈 <b>Vantagem:</b> {edge_pct:.1f}%
+🔥 <b>Confiança:</b> {confidence_pct:.0f}%
 
-🔍 <b>Padrão:</b> {opportunity['pattern_type'].replace('_', ' ')}
-💡 <b>Explicação:</b> {opportunity.get('pattern_explanation', '')[:120]}
+💡 <b>Análise:</b> {pattern_explanation}
 
-⚠️ <b>INSTRUÇÕES DE TRADING:</b>
-{opportunity.get('bet_instruction', 'Verificar odds de mercado')}
-📊 <b>Referência:</b> Odd Justa = {opportunity['fair_odds']}
+💵 <b>Stake Recomendado:</b> €{opportunity.get('stake_amount', 0):.0f}
+💎 <b>Retorno Esperado:</b> €{opportunity.get('expected_value', 0):.2f}"""
+            
+            return await self._send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar alerta de odds justas: {e}")
+            return False
+    
+    async def send_error_alert(self, error_message: str, context: str = "") -> bool:
+        """Envia alerta de erro do sistema"""
+        try:
+            escaped_error = self._escape_html(error_message)
+            escaped_context = self._escape_html(context)
+            
+            message = f"""🚨 <b>ERRO NO SISTEMA</b> 🚨
 
-🤖 <i>Bot Primeira Liga - Foco nos Grandes</i>
-        """
-    
-    return await self.send_message(message.strip())
+❌ <b>Erro:</b> {escaped_error}
+📍 <b>Contexto:</b> {escaped_context}
+⏰ <b>Timestamp:</b> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 
-async def send_match_analysis_summary(self, match_data: Dict, opportunities: List[Dict]) -> bool:
-    """Envia resumo completo do jogo analisado"""
+🔧 Verificar logs do sistema para mais detalhes."""
+            
+            return await self._send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar alerta de erro: {e}")
+            return False
     
-    if not opportunities:
-        return False
-    
-    home_team = match_data.get('home_team', '')
-    away_team = match_data.get('away_team', '')
-    main_pattern = opportunities[0].get('pattern_type', '').replace('_', ' ')
-    
-    # Separar por tipo de mercado
-    result_markets = [opp for opp in opportunities if opp['market'] in ['home_win', 'draw', 'away_win']]
-    goal_markets = [opp for opp in opportunities if opp['market'].startswith('over_') or opp['market'].startswith('under_')]
-    
-    message = f"""
-📊 <b>RESUMO - JOGO DOS GRANDES</b>
-
-🏆 <b>{home_team} vs {away_team}</b>
-📅 {match_data.get('match_date', 'N/A')} às {match_data.get('match_time', 'N/A')}
-🔍 <b>Padrão:</b> {main_pattern}
-
-📈 <b>MERCADOS COM ODDS JUSTAS:</b>
-"""
-    
-    # Resultado final
-    if result_markets:
-        message += "\n🎯 <b>Resultado Final (1X2):</b>"
-        for opp in result_markets:
-            message += f"\n• {opp['market_name']}: Fair {opp['fair_odds']} ({opp['probability_pct']}%)"
-    
-    # Over/Under golos
-    if goal_markets:
-        message += "\n\n⚽ <b>Totais de Golos:</b>"
-        for opp in goal_markets:
-            message += f"\n• {opp['market_name']}: Fair {opp['fair_odds']} ({opp['probability_pct']}%)"
-    
-    message += f"""
-
-💡 <b>Compare odds do mercado com valores Fair indicados</b>
-🔥 <b>Confiança Média:</b> {sum(opp['confidence'] for opp in opportunities) / len(opportunities) * 100:.0f}%
-
-🤖 <i>Análise focada nos 3 grandes</i>
-    """
-    
-    return await self.send_message(message.strip())
-
-    
-    async def send_error_alert(self, error_type: str, error_message: str, 
-                              context: Optional[str] = None) -> bool:
-        """Envia alerta de erro crítico"""
-        
-        message = f"""
-🚨 <b>ERRO CRÍTICO DETECTADO</b>
-
-⚠️ <b>Tipo:</b> {error_type}
-📝 <b>Mensagem:</b> {error_message[:200]}
-📅 <b>Timestamp:</b> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-"""
-        
-        if context:
-            message += f"\n🔍 <b>Contexto:</b> {context[:100]}"
-        
-        message += "\n\n🔧 <i>Verificar logs para mais detalhes</i>"
-        message += "\n🤖 <i>Bot Primeira Liga</i>"
-        
-        return await self.send_message(message.strip())
-    
-    async def test_connection(self) -> bool:
-        """Testa conexão com Telegram"""
-        test_message = f"""
-🧪 <b>TESTE DE CONEXÃO</b>
+    async def send_test_message(self) -> bool:
+        """Envia mensagem de teste para verificar conectividade"""
+        try:
+            message = f"""🧪 <b>TESTE DE CONEXÃO</b>
 
 ✅ Bot conectado com sucesso!
-📅 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-🏆 Liga: {config.LEAGUE_ID} | Época: {config.SEASON}
+⏰ {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 
-🤖 <i>Sistema operacional</i>
-        """
-        
-        result = await self.send_message(test_message.strip())
-        
-        if result:
-            logger.info("Teste de conexão Telegram bem-sucedido")
-        else:
-            logger.error("Teste de conexão Telegram falhou")
-        
-        return result
+🏆 Primeira Liga Value Bot operacional."""
+            
+            return await self._send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem de teste: {e}")
+            return False
+    
+    async def close(self):
+        """Fecha a sessão HTTP"""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            logger.info("Sessão Telegram fechada")
 
-# Instância global
+# Instância global do serviço
 telegram_service = TelegramService()
