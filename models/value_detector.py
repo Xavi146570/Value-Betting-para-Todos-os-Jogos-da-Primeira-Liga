@@ -1,584 +1,366 @@
-import math
+import logging
 from typing import Dict, List, Optional
 from datetime import datetime
-import logging
-from config import config
+import math
+
+# Importar config com fallback robusto
+try:
+    from config import config
+except ImportError:
+    import os
+    class Config:
+        MIN_EDGE = float(os.environ.get("MIN_EDGE", "0.03"))          # 3%
+        MAX_STAKE_PCT = float(os.environ.get("MAX_STAKE_PCT", "0.02")) # 2%
+        KELLY_FRACTION = float(os.environ.get("KELLY_FRACTION", "0.25")) # 25%
+        BANKROLL = float(os.environ.get("BANKROLL", "10000"))
+        MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.15")) # 15%
+    config = Config()
 
 logger = logging.getLogger(__name__)
 
 class ValueDetector:
     def __init__(self):
-        self.min_edge = config.MIN_EDGE
-        self.max_stake_pct = config.MAX_STAKE_PCT
-        self.kelly_fraction = config.KELLY_FRACTION
+        """Inicializa o detector de value bets com configurações da Primeira Liga"""
+        # Parâmetros principais
+        self.min_edge = getattr(config, 'MIN_EDGE', 0.03)  # 3% edge mínimo
+        self.max_stake_pct = getattr(config, 'MAX_STAKE_PCT', 0.02)  # 2% bankroll máximo
+        self.kelly_fraction = getattr(config, 'KELLY_FRACTION', 0.25)  # 25% Kelly fracionário
+        self.bankroll = getattr(config, 'BANKROLL', 10000.0)
+        self.min_confidence = getattr(config, 'MIN_CONFIDENCE', 0.15)  # 15% confiança mínima
         
-        # Confiança base por mercado calibrada para a Primeira Liga (baseada em backtesting histórico)
-        self.market_confidence = {
-            # Mercados de alta confiança (padrões muito consistentes)
-            'btts_no': 0.85,                    # Equipas pequenas raramente marcam fora vs grandes
-            'under_25': 0.82,                  # Padrão defensivo muito consistente
-            'ah_away_plus_15': 0.83,           # Combinação efeito casa + fadiga europeia
-            
-            # Mercados de confiança moderada-alta
-            'over_25': 0.78,                   # Bom em dominância hierárquica
-            'home_win': 0.75,                  # Fator casa forte na Primeira Liga
-            'ah_home_minus_15': 0.74,          # Dominância dos grandes
-            'ah_away_plus_125': 0.80,          # Versão mais segura do +1.5
-            
-            # Mercados de confiança moderada
-            'btts_yes': 0.72,                  # Mais imprevisível
-            'draw': 0.70,                      # Alta variance mas value ocasional
-            'away_win': 0.68,                  # Surpresas acontecem
-            'under_35': 0.75,                  # Consistente em jogos defensivos
-            'over_35': 0.65,                   # Mais volátil
-            
-            # Mercados específicos
-            'ah_home_minus_125': 0.72,         # Split bet, boa para grandes
-            'over_15': 0.70,                   # Comum mas ocasionalmente valuable
-            'under_15': 0.65                   # Raro mas específico
-        }
+        # Limites de segurança
+        self.min_odds = 1.2   # Odds mínimas aceites
+        self.max_odds = 15.0  # Odds máximas aceites
+        self.min_stake = 5.0  # Stake mínimo em euros
         
-        # Multiplicadores de confiança por padrão (baseados em análise histórica)
-        self.pattern_multipliers = {
-            'Dominancia_Hierarquica': 1.18,    # Padrão mais consistente da liga
-            'Ressaca_Europeia': 1.12,          # Bem documentado e consistente
-            'Fortaleza_Defensiva': 1.10,       # Forte para handicaps e unders
-            'Fortaleza_Caseira': 1.08,         # Moderadamente consistente
-            'Caos_Meio_Tabela': 0.95           # Menos previsível por natureza
-        }
-        
-        # Thresholds de edge específicos por mercado (alguns precisam mais edge)
-        self.market_edge_thresholds = {
-            'draw': 0.04,                      # Empates precisam edge maior
-            'away_win': 0.035,                 # Vitórias fora também
-            'over_35': 0.04,                   # Mercado mais volátil
-            'btts_no': 0.025,                  # Padrão forte, aceita menos edge
-            'under_25': 0.025,                 # Padrão defensivo consistente
-            'ah_away_plus_15': 0.025           # Padrão muito robusto
-        }
+        logger.info(
+            f"💎 ValueDetector inicializado - "
+            f"Min Edge: {self.min_edge*100:.1f}%, "
+            f"Max Stake: {self.max_stake_pct*100:.1f}%, "
+            f"Bankroll: €{self.bankroll:,.0f}, "
+            f"Kelly Fraction: {self.kelly_fraction:.0%}"
+        )
     
-    def detect_value_opportunities(self, match_data: Dict, model_probs: Dict, 
-                                 market_odds: Dict) -> List[Dict]:
+    def find_value_bets(self, model_probs: Dict[str, float], market_odds: Dict[str, float], 
+                       fixture_data: Dict) -> List[Dict]:
         """
-        Detecta oportunidades de value comparando probabilidades do modelo vs mercado
+        Encontra value bets comparando probabilidades do modelo com odds de mercado
         
         Args:
-            match_data: Dados do jogo (equipas, posições, contexto)
-            model_probs: Probabilidades calculadas pelo modelo
-            market_odds: Odds disponíveis no mercado
-            
+            model_probs: Probabilidades calculadas pelo modelo {'home_win': 0.45, ...}
+            market_odds: Odds de mercado {'home_win': 2.10, ...}
+            fixture_data: Dados do jogo (id, equipas, data, etc.)
+        
         Returns:
-            Lista de value bets ordenados por Expected Value descendente
+            Lista de value bets encontrados
         """
-        
-        # Validações de entrada
-        if not model_probs or not market_odds:
-            logger.warning("Probabilidades do modelo ou odds do mercado indisponíveis")
-            return []
-        
-        if not match_data:
-            logger.warning("Dados do jogo indisponíveis")
-            return []
-        
-        # Classificar padrão do jogo
-        pattern_info = self._classify_match_pattern(match_data)
-        logger.debug(f"Padrão identificado: {pattern_info['type']} "
-                    f"(multiplicador: {pattern_info['confidence_multiplier']:.2f})")
-        
-        value_bets = []
-        
-        for market, model_prob in model_probs.items():
-            # Validações básicas
-            if (market not in market_odds or 
-                model_prob <= 0 or model_prob >= 1):
-                continue
+        try:
+            value_bets = []
             
-            odds = float(market_odds[market])
-            if odds <= 1.01 or odds > 100:  # Odds irracionais
-                continue
+            if not model_probs or not market_odds:
+                logger.warning("📊 Probabilidades ou odds vazias - nenhuma análise possível")
+                return value_bets
             
-            # Calcular edge
-            market_prob = 1.0 / odds
-            edge = model_prob - market_prob
+            home_team = fixture_data.get('home_team', 'N/A')
+            away_team = fixture_data.get('away_team', 'N/A')
             
-            # Verificar threshold específico do mercado
-            min_edge_required = self.market_edge_thresholds.get(market, self.min_edge)
+            logger.info(f"🔍 Analisando {len(model_probs)} mercados para {home_team} vs {away_team}")
             
-            if edge >= min_edge_required:
-                # Calcular confiança ajustada
-                confidence = self._calculate_confidence(market, edge, pattern_info)
+            for market, model_prob in model_probs.items():
+                if market not in market_odds:
+                    logger.debug(f"❌ Mercado {market} não encontrado nas odds")
+                    continue
                 
-                # Calcular stake usando Kelly fracionado
-                stake_pct = self._calculate_kelly_stake(model_prob, odds, confidence)
+                market_odd = market_odds[market]
                 
-                if stake_pct > 0.005:  # Mínimo 0.5% da bankroll
-                    stake_amount = config.BANKROLL * stake_pct
-                    expected_value = self._calculate_expected_value(model_prob, odds, stake_amount)
+                # Validações de segurança
+                if not self._is_valid_market(model_prob, market_odd, market):
+                    continue
+                
+                # Calcular métricas de value betting
+                metrics = self._calculate_value_metrics(model_prob, market_odd)
+                
+                # Verificar se é value bet
+                if metrics['edge'] >= self.min_edge and metrics['confidence'] >= self.min_confidence:
+                    # Calcular stake usando Kelly Criterion
+                    stake_data = self._calculate_optimal_stake(metrics['edge'], model_prob, market_odd)
                     
+                    # Identificar padrão de betting
+                    pattern_info = self._identify_betting_pattern(market, market_odd, metrics['edge'], fixture_data)
+                    
+                    # Construir value bet
                     value_bet = {
+                        # Dados do jogo
+                        'fixture_id': fixture_data.get('fixture_id'),
+                        'home_team': home_team,
+                        'away_team': away_team,
+                        'match_date': fixture_data.get('match_date'),
+                        'match_time': fixture_data.get('match_time'),
+                        
+                        # Dados da aposta
                         'market': market,
-                        'odds': odds,
-                        'model_prob': model_prob,
-                        'market_prob': market_prob,
-                        'edge': edge,
-                        'edge_pct': edge * 100,
-                        'confidence': confidence,
-                        'stake_pct': stake_pct * 100,
-                        'stake_amount': stake_amount,
-                        'expected_value': expected_value,
+                        'odds': round(market_odd, 2),
+                        'model_prob': round(model_prob, 4),
+                        'market_prob': round(metrics['implied_prob'], 4),
+                        
+                        # Métricas de value
+                        'edge': round(metrics['edge'], 4),
+                        'edge_pct': round(metrics['edge'] * 100, 2),  # Para compatibilidade
+                        'confidence': round(metrics['confidence'], 3),
+                        
+                        # Gestão de bankroll
+                        'stake_amount': stake_data['stake'],
+                        'expected_value': stake_data['expected_value'],
+                        'kelly_percentage': stake_data['kelly_pct'],
+                        
+                        # Contexto e padrões
                         'pattern_type': pattern_info['type'],
-                        'pattern_explanation': self._get_pattern_explanation(market, pattern_info, match_data),
-                        'market_display_name': self._get_market_display_name(market),
-                        'risk_assessment': self._assess_risk_level(market, edge, confidence)
+                        'pattern_explanation': pattern_info['explanation'],
+                        'risk_level': self._assess_risk_level(metrics['edge'], market_odd),
+                        
+                        # Metadados
+                        'created_at': datetime.now()
                     }
                     
                     value_bets.append(value_bet)
                     
-                    logger.info(f"Value bet: {market} @ {odds} "
-                              f"(edge: {edge*100:.2f}%, EV: €{expected_value:.2f})")
-        
-        # Ordenar por Expected Value descendente
-        value_bets.sort(key=lambda x: x['expected_value'], reverse=True)
-        
-        # Limitar apostas por jogo para gestão de risco
-        max_bets = 4
-        if len(value_bets) > max_bets:
-            logger.info(f"Limitando a {max_bets} melhores apostas de {len(value_bets)} encontradas")
-            value_bets = value_bets[:max_bets]
-        
-        return value_bets
-    
-    def _classify_match_pattern(self, match_data: Dict) -> Dict:
-        """Classifica o jogo nos padrões identificados da Primeira Liga"""
-        
-        home_team = match_data.get('home_team', '').strip()
-        away_team = match_data.get('away_team', '').strip()
-        home_position = int(match_data.get('home_position', 10))
-        away_position = int(match_data.get('away_position', 10))
-        
-        # Identificar equipas grandes
-        home_is_big = any(big in home_team for big in config.BIG_THREE)
-        away_is_big = any(big in away_team for big in config.BIG_THREE)
-        
-        # Padrão 1: Dominância Hierárquica (Grande em casa vs Pequeno)
-        if home_is_big and not away_is_big and away_position > 9:
-            return {
-                'type': 'Dominancia_Hierarquica',
-                'confidence_multiplier': self.pattern_multipliers['Dominancia_Hierarquica'],
-                'description': f'{home_team} (grande) em casa vs {away_team} (pequeno)',
-                'strength': 'high'
-            }
-        
-        # Padrão 2: Ressaca Europeia
-        if match_data.get('european_midweek', False):
-            days_rest = match_data.get('days_rest', 7)
-            if days_rest <= 3 and home_is_big:
-                return {
-                    'type': 'Ressaca_Europeia',
-                    'confidence_multiplier': self.pattern_multipliers['Ressaca_Europeia'],
-                    'description': f'Fadiga pós-Europa: {days_rest} dias de descanso',
-                    'strength': 'high'
-                }
-        
-        # Padrão 3: Fortaleza Defensiva (Pequeno em casa vs Grande)
-        if not home_is_big and away_is_big:
-            return {
-                'type': 'Fortaleza_Defensiva',
-                'confidence_multiplier': self.pattern_multipliers['Fortaleza_Defensiva'],
-                'description': f'{home_team} (casa) vs {away_team} (grande visitante)',
-                'strength': 'medium'
-            }
-        
-        # Padrão 4: Fortaleza Caseira
-        fortress_rating = match_data.get('home_fortress_rating', 5.0)
-        if not home_is_big and fortress_rating > 7.0:
-            return {
-                'type': 'Fortaleza_Caseira',
-                'confidence_multiplier': self.pattern_multipliers['Fortaleza_Caseira'],
-                'description': f'{home_team} forte em casa (rating: {fortress_rating:.1f})',
-                'strength': 'medium'
-            }
-        
-        # Padrão 5: Caos do Meio da Tabela (default)
-        return {
-            'type': 'Caos_Meio_Tabela',
-            'confidence_multiplier': self.pattern_multipliers['Caos_Meio_Tabela'],
-            'description': 'Confronto equilibrado entre equipas similares',
-            'strength': 'low'
-        }
-    
-    def _calculate_confidence(self, market: str, edge: float, pattern_info: Dict) -> float:
-        """
-        Calcula confiança final combinando confiança base, edge bonus e padrão
-        
-        Args:
-            market: Nome do mercado
-            edge: Vantagem sobre as odds de mercado
-            pattern_info: Informação do padrão classificado
+                    logger.info(
+                        f"💎 VALUE BET ENCONTRADO: {market} @ {market_odd:.2f} | "
+                        f"Edge: {metrics['edge']*100:.1f}% | "
+                        f"Confiança: {metrics['confidence']*100:.0f}% | "
+                        f"Stake: €{stake_data['stake']:.0f} | "
+                        f"EV: €{stake_data['expected_value']:.2f}"
+                    )
+                else:
+                    logger.debug(
+                        f"❌ Sem value: {market} @ {market_odd:.2f} "
+                        f"(Edge: {metrics['edge']*100:.1f}%, Conf: {metrics['confidence']*100:.0f}%)"
+                    )
             
-        Returns:
-            Confiança entre 0.50 e 0.95
-        """
-        
-        # Confiança base do mercado
-        base_confidence = self.market_confidence.get(market, 0.70)
-        
-        # Multiplicador do padrão
-        pattern_multiplier = pattern_info.get('confidence_multiplier', 1.0)
-        
-        # Bonus por edge alto (mais edge = mais confiança, até limite)
-        edge_bonus = min(edge * 2.0, 0.12)  # Máximo 12% bonus
-        
-        # Ajustes específicos mercado-padrão
-        specific_adjustment = self._get_market_pattern_adjustment(market, pattern_info['type'])
-        
-        # Calcular confiança final
-        final_confidence = ((base_confidence + edge_bonus + specific_adjustment) * 
-                           pattern_multiplier)
-        
-        # Limitar entre 0.50 e 0.95
-        return max(0.50, min(0.95, final_confidence))
-    
-    def _get_market_pattern_adjustment(self, market: str, pattern_type: str) -> float:
-        """Ajustes específicos para combinações mercado + padrão comprovadas"""
-        
-        adjustments = {
-            # Dominância Hierárquica
-            ('btts_no', 'Dominancia_Hierarquica'): 0.08,
-            ('ah_home_minus_15', 'Dominancia_Hierarquica'): 0.07,
-            ('over_25', 'Dominancia_Hierarquica'): 0.06,
+            # Ordenar por expected value descendente
+            value_bets.sort(key=lambda x: x['expected_value'], reverse=True)
             
-            # Ressaca Europeia
-            ('ah_away_plus_15', 'Ressaca_Europeia'): 0.10,
-            ('under_25', 'Ressaca_Europeia'): 0.06,
-            ('draw', 'Ressaca_Europeia'): 0.05,
+            if value_bets:
+                logger.info(f"✅ Encontrados {len(value_bets)} value bets para {home_team} vs {away_team}")
+            else:
+                logger.info(f"📊 Nenhum value bet encontrado para {home_team} vs {away_team}")
             
-            # Fortaleza Defensiva
-            ('ah_away_plus_15', 'Fortaleza_Defensiva'): 0.08,
-            ('under_25', 'Fortaleza_Defensiva'): 0.07,
-            ('draw', 'Fortaleza_Defensiva'): 0.06,
+            return value_bets
             
-            # Fortaleza Caseira
-            ('home_win', 'Fortaleza_Caseira'): 0.08,
-            ('draw', 'Fortaleza_Caseira'): 0.05,
-            ('under_25', 'Fortaleza_Caseira'): 0.04
-        }
-        
-        return adjustments.get((market, pattern_type), 0.0)
+        except Exception as e:
+            logger.error(f"❌ Erro ao encontrar value bets: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
     
-    def _calculate_kelly_stake(self, prob: float, odds: float, confidence: float) -> float:
-        """
-        Calcula stake usando Kelly Criterion fracionado com ajustes de segurança
-        
-        Fórmula: f = (bp - q) / b
-        onde b = odds - 1, p = probabilidade, q = 1 - p
-        """
-        
-        if prob <= 0 or prob >= 1 or odds <= 1.01:
-            return 0.0
-        
-        b = odds - 1.0  # Lucro líquido por unidade
-        q = 1.0 - prob  # Probabilidade de perder
-        
-        # Kelly ótimo
-        kelly_optimal = (b * prob - q) / b
-        
-        if kelly_optimal <= 0:
-            return 0.0
-        
-        # Aplicar fração de segurança e ajuste por confiança
-        kelly_adjusted = kelly_optimal * self.kelly_fraction * confidence
-        
-        # Aplicar limite máximo
-        final_stake = min(kelly_adjusted, self.max_stake_pct)
-        
-        return max(0.0, final_stake)
-    
-    def _calculate_expected_value(self, prob: float, odds: float, stake_amount: float) -> float:
-        """Calcula Expected Value em euros"""
-        return (prob * (odds - 1.0) - (1.0 - prob)) * stake_amount
-    
-    def _get_pattern_explanation(self, market: str, pattern_info: Dict, 
-                               match_data: Dict) -> str:
-        """Gera explicação específica do value baseada no padrão e mercado"""
-        
-        pattern_type = pattern_info['type']
-        home_team = match_data.get('home_team', 'Casa')
-        away_team = match_data.get('away_team', 'Fora')
-        
-        explanations = {
-            'Dominancia_Hierarquica': {
-                'btts_no': f'{home_team} sofre poucos golos em casa vs pequenos (histórico 73%)',
-                'ah_home_minus_15': f'{home_team} cobre -1.5 em 68% vs equipas fracas',
-                'over_25': f'{home_team} marca média 2.6 golos em casa vs fundo da tabela',
-                'home_win': f'{home_team} vence 78% em casa vs equipas posições 10+',
-                'under_35': f'Jogos controlados: {home_team} domina sem precisar muitos golos'
-            },
-            
-            'Ressaca_Europeia': {
-                'ah_away_plus_15': f'Fadiga pós-Europa: {home_team} tem 15% queda na intensidade',
-                'under_25': f'Ritmo reduzido: -0.4 golos média em jogos pós-Europa',
-                'draw': f'Fadiga física e mental equilibra diferenças técnicas',
-                'away_win': f'{away_team} aproveita momento de vulnerabilidade pós-Europa'
-            },
-            
-            'Fortaleza_Defensiva': {
-                'ah_away_plus_15': f'{home_team} defensivamente sólido em casa vs grandes',
-                'under_25': f'Jogo defensivo: {home_team} prioriza não sofrer golos',
-                'draw': f'Fator casa + motivação equilibra diferença de qualidade',
-                'btts_no': f'{away_team} tem dificuldades contra blocos baixos organizados'
-            },
-            
-            'Fortaleza_Caseira': {
-                'home_win': f'{home_team} muito forte em casa (rating fortaleza alto)',
-                'draw': f'Fator casa amplificado pode segurar empate',
-                'under_25': f'{home_team} controla ritmo em casa, jogos mais fechados'
-            },
-            
-            'Caos_Meio_Tabela': {
-                'draw': f'Confronto equilibrado favorece resultado nulo',
-                'btts_yes': f'Ambas precisam pontos, jogos mais abertos',
-                'over_25': f'Imprevisibilidade pode gerar mais golos',
-                'under_25': f'Equipas cautelosas em confrontos diretos importantes'
-            }
-        }
-        
-        pattern_explanations = explanations.get(pattern_type, {})
-        return pattern_explanations.get(
-            market, 
-            f"Value identificado via padrão {pattern_type.replace('_', ' ')}"
-        )
-    
-    def _get_market_display_name(self, market: str) -> str:
-        """Converte nome técnico para nome amigável português"""
-        
-        display_names = {
-            'home_win': 'Vitória Casa (1)',
-            'draw': 'Empate (X)',
-            'away_win': 'Vitória Fora (2)',
-            'over_15': 'Over 1.5 Golos',
-            'under_15': 'Under 1.5 Golos',
-            'over_25': 'Over 2.5 Golos',
-            'under_25': 'Under 2.5 Golos',
-            'over_35': 'Over 3.5 Golos',
-            'under_35': 'Under 3.5 Golos',
-            'btts_yes': 'Ambas Marcam - Sim',
-            'btts_no': 'Ambas Marcam - Não',
-            'ah_home_minus_15': 'Handicap Casa -1.5',
-            'ah_away_plus_15': 'Handicap Fora +1.5',
-            'ah_home_minus_125': 'Handicap Casa -1.25',
-            'ah_away_plus_125': 'Handicap Fora +1.25',
-            'ah_home_minus_05': 'Handicap Casa -0.5',
-            'ah_away_plus_05': 'Handicap Fora +0.5'
-        }
-        
-        return display_names.get(market, market.replace('_', ' ').title())
-    
-    def _assess_risk_level(self, market: str, edge: float, confidence: float) -> str:
-        """Avalia nível de risco da aposta"""
-        
-        # Mercados intrinsecamente arriscados
-        high_risk_markets = ['away_win', 'over_35', 'ah_home_minus_15']
-        low_risk_markets = ['btts_no', 'under_25', 'ah_away_plus_15', 'home_win']
-        
-        risk_score = 0
-        
-        # Ajuste por tipo de mercado
-        if market in high_risk_markets:
-            risk_score += 2
-        elif market in low_risk_markets:
-            risk_score -= 1
-        
-        # Ajuste por edge (mais edge = menos risco relativo)
-        if edge > 0.08:
-            risk_score -= 2
-        elif edge < 0.04:
-            risk_score += 1
-        
-        # Ajuste por confiança
-        if confidence > 0.85:
-            risk_score -= 1
-        elif confidence < 0.70:
-            risk_score += 1
-        
-        # Classificar
-        if risk_score <= -1:
-            return 'Baixo'
-        elif risk_score >= 2:
-            return 'Alto'
-        else:
-            return 'Médio'
-    
-    def validate_value_bet(self, value_bet: Dict) -> bool:
-        """Valida se um value bet está bem formado"""
-        
-        required_fields = ['market', 'odds', 'model_prob', 'edge', 'stake_amount']
-        
-        for field in required_fields:
-            if field not in value_bet:
-                logger.error(f"Campo obrigatório {field} em falta no value bet")
+    def _is_valid_market(self, model_prob: float, market_odd: float, market: str) -> bool:
+        """Valida se o mercado é elegível para análise"""
+        try:
+            # Validar tipos
+            if not isinstance(model_prob, (int, float)) or not isinstance(market_odd, (int, float)):
+                logger.debug(f"❌ Tipos inválidos para {market}: prob={type(model_prob)}, odd={type(market_odd)}")
                 return False
-        
-        # Validações de valores
-        if value_bet['odds'] <= 1.01 or value_bet['odds'] > 100:
-            logger.error(f"Odds inválidas: {value_bet['odds']}")
-            return False
-        
-        if not (0 < value_bet['model_prob'] < 1):
-            logger.error(f"Probabilidade do modelo inválida: {value_bet['model_prob']}")
-            return False
-        
-        if value_bet['edge'] < 0:
-            logger.error(f"Edge negativo: {value_bet['edge']}")
-            return False
-        
-        return True
-
-# Instância global
-value_detector = ValueDetector()
-def generate_fair_odds_analysis(self, match_data: Dict, model_probs: Dict) -> List[Dict]:
-    """
-    Gera análise de odds justas para jogos dos 3 grandes
-    Mercados: Over/Under 0.5, 1.5 e resultado final com Back/Lay inteligente
-    """
-    
-    # Classificar padrão do jogo
-    pattern_info = self._classify_match_pattern(match_data)
-    
-    # Mercados alvo: O/U 0.5, O/U 1.5, 1X2
-    target_markets = ['over_05', 'over_15', 'home_win', 'draw', 'away_win']
-    
-    # Confiança específica por mercado-padrão dos grandes
-    pattern_confidence = {
-        ('over_15', 'Dominancia_Hierarquica'): 0.90,  # Grandes marcam muito em casa
-        ('home_win', 'Dominancia_Hierarquica'): 0.88,  # Vitórias consistentes
-        ('over_05', 'Dominancia_Hierarquica'): 0.95,   # Quase sempre há golos
-        ('away_win', 'Ressaca_Europeia'): 0.85,        # Zebra pós-Europa
-        ('draw', 'Ressaca_Europeia'): 0.82,            # Empate por fadiga
-        ('over_05', 'Fortaleza_Defensiva'): 0.80,      # Pelo menos 1 golo esperado
-        ('draw', 'Fortaleza_Defensiva'): 0.85          # Arouca vs Benfica tipo
-    }
-    
-    opportunities = []
-    
-    # Identificar favorito para lógica Back/Lay
-    probs_1x2 = {
-        'home_win': model_probs.get('home_win', 0),
-        'draw': model_probs.get('draw', 0),
-        'away_win': model_probs.get('away_win', 0)
-    }
-    
-    favorite_market = max(probs_1x2.keys(), key=lambda k: probs_1x2[k])
-    favorite_prob = probs_1x2[favorite_market]
-    
-    for market in target_markets:
-        if market not in model_probs:
-            continue
-        
-        model_prob = model_probs[market]
-        if model_prob <= 0 or model_prob >= 1:
-            continue
-        
-        # Calcular odd justa
-        fair_odds = round(1.0 / model_prob, 2)
-        
-        # Margem para value (3% conservador)
-        margin = 0.03
-        min_value_odds = round(fair_odds * (1 + margin), 2)
-        
-        # Confiança específica
-        confidence = pattern_confidence.get(
-            (market, pattern_info['type']), 
-            0.75  # Default
-        )
-        
-        # Apenas oportunidades com confiança ≥ 70%
-        if confidence >= 0.70:
-            # Determinar tipo de aposta inteligente
-            bet_instruction = self._generate_bet_instruction(
-                market, fair_odds, min_value_odds, favorite_market, favorite_prob
-            )
             
-            opportunities.append({
-                'market': market,
-                'market_name': self._get_focused_market_name(market),
-                'model_prob': model_prob,
-                'probability_pct': round(model_prob * 100, 1),
-                'fair_odds': fair_odds,
-                'min_value_odds': min_value_odds,
-                'confidence': confidence,
-                'pattern_type': pattern_info['type'],
-                'pattern_explanation': self._get_focused_pattern_explanation(market, pattern_info, match_data),
-                'bet_instruction': bet_instruction
-            })
+            # Validar probabilidade
+            if model_prob <= 0 or model_prob >= 1:
+                logger.debug(f"❌ Probabilidade inválida para {market}: {model_prob}")
+                return False
+            
+            # Validar odds
+            if market_odd < self.min_odds or market_odd > self.max_odds:
+                logger.debug(f"❌ Odds fora dos limites para {market}: {market_odd} (limites: {self.min_odds}-{self.max_odds})")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na validação do mercado {market}: {e}")
+            return False
     
-    # Ordenar por confiança e limitar a 3 melhores
-    opportunities.sort(key=lambda x: x['confidence'], reverse=True)
-    return opportunities[:3]
-
-def _generate_bet_instruction(self, market: str, fair_odds: float, min_value_odds: float,
-                            favorite_market: str, favorite_prob: float) -> str:
-    """Gera instrução inteligente de Back/Lay baseada no mercado e contexto"""
+    def _calculate_value_metrics(self, model_prob: float, market_odd: float) -> Dict:
+        """Calcula métricas de value betting"""
+        try:
+            # Probabilidade implícita das odds de mercado
+            implied_prob = 1.0 / market_odd
+            
+            # Edge: retorno esperado por euro apostado - 1
+            # Fórmula padrão: Edge = (P_modelo × Odd_mercado) - 1
+            edge = (model_prob * market_odd) - 1.0
+            
+            # Confiança baseada na diferença de probabilidades
+            prob_difference = abs(model_prob - implied_prob)
+            
+            # Confiança escalada: maior diferença = maior confiança
+            base_confidence = min(1.0, prob_difference * 4.0)  # Escalar 0-0.25 para 0-1
+            
+            # Ajuste por magnitude do edge
+            if edge > 0.10:  # Edge > 10%
+                confidence_multiplier = 1.2
+            elif edge > 0.05:  # Edge > 5%
+                confidence_multiplier = 1.1
+            else:
+                confidence_multiplier = 1.0
+            
+            final_confidence = min(1.0, base_confidence * confidence_multiplier)
+            
+            return {
+                'edge': edge,
+                'implied_prob': implied_prob,
+                'confidence': final_confidence,
+                'prob_difference': prob_difference
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Erro no cálculo de métricas: {e}")
+            return {
+                'edge': 0.0,
+                'implied_prob': 0.5,
+                'confidence': 0.0,
+                'prob_difference': 0.0
+            }
     
-    # Over golos - sempre Back (conforme preferência do utilizador)
-    if market.startswith('over_'):
-        return f"✅ BACK se odds > {min_value_odds}"
+    def _calculate_optimal_stake(self, edge: float, model_prob: float, market_odd: float) -> Dict:
+        """Calcula stake optimal usando Kelly Criterion fracionário"""
+        try:
+            # Kelly Criterion: f* = (bp - q) / b
+            # onde: b = odds - 1, p = prob_modelo, q = 1 - p
+            b = market_odd - 1.0
+            p = model_prob
+            q = 1.0 - p
+            
+            if b <= 0:  # Odds inválidas
+                kelly_pct = 0.0
+            else:
+                kelly_optimal = (b * p - q) / b
+                kelly_pct = max(0.0, kelly_optimal)
+            
+            # Aplicar fração de Kelly para reduzir risco
+            fractional_kelly = kelly_pct * self.kelly_fraction
+            
+            # Limitar por percentagem máxima do bankroll
+            final_kelly_pct = min(fractional_kelly, self.max_stake_pct)
+            
+            # Calcular stake em euros
+            stake = self.bankroll * final_kelly_pct
+            
+            # Aplicar stake mínimo
+            if final_kelly_pct > 0:
+                stake = max(self.min_stake, stake)
+            else:
+                stake = 0.0
+            
+            # Expected Value: EV = Stake × Edge
+            expected_value = stake * edge
+            
+            return {
+                'kelly_pct': round(final_kelly_pct * 100, 2),
+                'stake': round(stake, 0),
+                'expected_value': round(expected_value, 2)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Erro no cálculo de stake: {e}")
+            return {
+                'kelly_pct': 0.0,
+                'stake': 0.0,
+                'expected_value': 0.0
+            }
     
-    # Under golos - Lay do Over correspondente (mais intuitivo)
-    if market.startswith('under_'):
-        over_market = market.replace('under_', 'over_')
-        return f"✅ LAY Over {market.split('_')[1]} se odds < {fair_odds}"
+    def _identify_betting_pattern(self, market: str, odds: float, edge: float, fixture_data: Dict) -> Dict:
+        """Identifica padrão de value betting"""
+        try:
+            # Contexto do jogo
+            context = fixture_data.get('context', {})
+            home_team = fixture_data.get('home_team', '')
+            away_team = fixture_data.get('away_team', '')
+            
+            # Padrão Favorito (odds baixas)
+            if odds <= 1.8:
+                return {
+                    'type': 'Favorito com Value',
+                    'explanation': f'Favorito ({odds:.2f}) com edge de {edge*100:.1f}% - modelo encontra valor em odds baixas'
+                }
+            
+            # Padrão Underdog (odds altas)
+            elif odds >= 4.0:
+                return {
+                    'type': 'Underdog Value',
+                    'explanation': f'Underdog ({odds:.2f}) com edge de {edge*100:.1f}% - mercado pode estar a subestimar'
+                }
+            
+            # Padrão Mercados de Golos
+            elif market in ['over_25', 'under_25']:
+                total_expected = context.get('total_goals', 2.5)
+                return {
+                    'type': 'Value em Totais',
+                    'explanation': f'Mercado de golos ({market}) com edge de {edge*100:.1f}% - xG total: {total_expected:.1f}'
+                }
+            
+            # Padrão BTTS
+            elif market in ['btts_yes', 'btts_no']:
+                return {
+                    'type': 'BTTS Value',
+                    'explanation': f'Both Teams To Score ({market}) com edge de {edge*100:.1f}% - análise ofensiva favorável'
+                }
+            
+            # Padrão dos 3 Grandes
+            elif any(big in home_team or big in away_team for big in ['Benfica', 'Porto', 'Sporting']):
+                return {
+                    'type': '3 Grandes Value',
+                    'explanation': f'Jogo dos 3 grandes com edge de {edge*100:.1f}% - vantagem competitiva identificada'
+                }
+            
+            # Padrão Standard
+            else:
+                return {
+                    'type': 'Value Padrão',
+                    'explanation': f'Value bet em {market} com edge de {edge*100:.1f}% - análise estatística padrão'
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Erro na identificação de padrão: {e}")
+            return {
+                'type': 'Padrão Desconhecido',
+                'explanation': f'Edge de {edge*100:.1f}% detectado'
+            }
     
-    # Resultado final - lógica Back/Lay favorito
-    if market == favorite_market:
-        if favorite_prob > 0.65:  # Favorito muito forte
-            return f"✅ BACK Favorito se odds > {min_value_odds} | LAY se odds < {fair_odds}"
-        else:  # Favorito moderado
-            return f"✅ LAY Favorito se odds < {fair_odds} | BACK se odds > {min_value_odds}"
-    else:  # Zebra ou empate
-        return f"✅ BACK Zebra se odds > {min_value_odds}"
-
-def _get_focused_market_name(self, market: str) -> str:
-    """Nomes dos mercados focados"""
-    names = {
-        'home_win': 'Vitória Casa (1)',
-        'draw': 'Empate (X)', 
-        'away_win': 'Vitória Fora (2)',
-        'over_05': 'Over 0.5 Golos',
-        'under_05': 'Under 0.5 Golos',
-        'over_15': 'Over 1.5 Golos',
-        'under_15': 'Under 1.5 Golos'
-    }
-    return names.get(market, market.replace('_', ' ').title())
-
-def _get_focused_pattern_explanation(self, market: str, pattern_info: Dict, match_data: Dict) -> str:
-    """Explicações focadas nos padrões dos grandes"""
+    def _assess_risk_level(self, edge: float, odds: float) -> str:
+        """Avalia nível de risco da aposta"""
+        try:
+            # Matriz de risco baseada em edge e odds
+            if edge >= 0.15:  # Edge >= 15%
+                if odds <= 3.0:
+                    return 'Baixo'
+                else:
+                    return 'Médio'
+            elif edge >= 0.08:  # Edge >= 8%
+                if odds <= 4.0:
+                    return 'Médio'
+                else:
+                    return 'Alto'
+            elif edge >= 0.05:  # Edge >= 5%
+                return 'Alto'
+            else:
+                return 'Muito Alto'
+                
+        except Exception as e:
+            logger.error(f"❌ Erro na avaliação de risco: {e}")
+            return 'Desconhecido'
     
-    pattern_type = pattern_info['type']
-    home_team = match_data.get('home_team', 'Casa')
-    away_team = match_data.get('away_team', 'Fora')
-    
-    explanations = {
-        'Dominancia_Hierarquica': {
-            'home_win': f'{home_team} vence 78% em casa vs equipas pequenas',
-            'over_05': f'Grandes marcam pelo menos 1 golo em 95% dos jogos casa',
-            'over_15': f'{home_team} média 2.6 golos casa vs fundo tabela',
-            'away_win': f'Zebra rara: {away_team} vence apenas 12% vs grandes casa'
-        },
-        'Ressaca_Europeia': {
-            'away_win': f'{away_team} aproveita fadiga pós-Europa de {home_team}',
-            'draw': f'Fadiga de {home_team} equilibra diferenças técnicas',
-            'over_05': f'Pelo menos 1 golo esperado mesmo com fadiga',
-            'over_15': f'Redução -15% intensidade pós-Europa pode limitar golos'
-        },
-        'Fortaleza_Defensiva': {
-            'draw': f'{home_team} + fator casa equilibra vs {away_team}',
-            'over_05': f'Pelo menos 1 golo esperado no confronto',
-            'over_15': f'Jogo pode ser mais fechado mas {away_team} tem qualidade',
-            'away_win': f'{away_team} tem qualidade para vencer fora ocasionalmente'
+    def get_market_explanation(self, market: str) -> str:
+        """Retorna explicação detalhada do mercado"""
+        explanations = {
+            'home_win': 'Vitória da equipa da casa (1)',
+            'draw': 'Empate (X)', 
+            'away_win': 'Vitória da equipa visitante (2)',
+            'over_25': 'Mais de 2.5 golos no jogo',
+            'under_25': 'Menos de 2.5 golos no jogo',
+            'btts_yes': 'Ambas as equipas marcam',
+            'btts_no': 'Pelo menos uma equipa não marca',
+            'ah_home_minus_15': 'Handicap Asiático Casa -1.5',
+            'ah_away_plus_15': 'Handicap Asiático Fora +1.5'
         }
-    }
-    
-    return explanations.get(pattern_type, {}).get(
-        market, f"Análise baseada em padrão {pattern_type.replace('_', ' ')}"
-    )
+        return explanations.get(market, f'Mercado: {market}')
+
+# Instância global do detector
+value_detector = ValueDetector()
