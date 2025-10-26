@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import asyncio
 import logging
@@ -47,10 +47,10 @@ class PrimeiraLigaBot:
         self.analysis_count += 1
         logger.info(f"Iniciando análise #{self.analysis_count} para próximos {days_ahead} dias")
         
+        all_value_bets = []
+        matches_analyzed = 0
+        
         try:
-            all_value_bets = []
-            matches_analyzed = 0
-            
             for day_offset in range(days_ahead):
                 target_date = (datetime.now() + timedelta(days=day_offset)).strftime('%Y-%m-%d')
                 logger.info(f"Analisando jogos de {target_date}")
@@ -63,7 +63,10 @@ class PrimeiraLigaBot:
                         value_bets = await self._analyze_single_match(fixture)
                         if value_bets:
                             all_value_bets.extend(value_bets)
-                            logger.info(f"Encontrados {len(value_bets)} value bets no jogo {fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}")
+                            logger.info(
+                                f"Encontrados {len(value_bets)} value bets no jogo "
+                                f"{fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}"
+                            )
                         
                         matches_analyzed += 1
                         await asyncio.sleep(2)  # Rate limit
@@ -72,61 +75,101 @@ class PrimeiraLigaBot:
                         logger.error(f"Erro ao analisar jogo {fixture.get('fixture', {}).get('id')}: {e}")
                         logger.error(traceback.format_exc())
             
+            # Salvar e enviar resultados
+            await self._save_value_bets(all_value_bets)
+            await self._send_analysis_results(matches_analyzed, all_value_bets)
             
-async def _send_analysis_results(self, matches_analyzed: int, all_opportunities: List[Dict]):
-    """Envia resultados focados nos 3 grandes com odds justas"""
-    try:
-        if not all_opportunities:
-            await telegram_service.send_daily_summary({
-                'matches_analyzed': matches_analyzed,
-                'value_bets_found': 0,
-                'avg_confidence': 0,
-                'focus': '3 Grandes apenas'
-            })
-            return
-        
-        # Agrupar por jogo
-        games_with_opportunities = {}
-        for opp in all_opportunities:
-            game_key = f"{opp['home_team']} vs {opp['away_team']}"
-            if game_key not in games_with_opportunities:
-                games_with_opportunities[game_key] = []
-            games_with_opportunities[game_key].append(opp)
-        
-        # Enviar análise detalhada por jogo (máximo 2 jogos)
-        for i, (game_key, opportunities) in enumerate(games_with_opportunities.items()):
-            if i >= 2:  # Limitar a 2 jogos por análise
-                break
+        except Exception as e:
+            logger.error(f"Erro geral na análise: {e}")
+            logger.error(traceback.format_exc())
+        finally:
+            self.is_running = False
+            self.last_analysis = datetime.now()
+            logger.info(
+                f"Análise concluída: {matches_analyzed} jogos analisados, {len(all_value_bets)} value bets encontrados"
+            )
+    
+    async def _analyze_single_match(self, fixture: Dict) -> List[Dict]:
+        """Analisa um único jogo e retorna value bets encontrados"""
+        try:
+            fixture_id = fixture['fixture']['id']
+            home_team = fixture['teams']['home']
+            away_team = fixture['teams']['away']
             
-            # Dados do primeiro jogo
-            match_data = {
-                'home_team': opportunities[0]['home_team'],
-                'away_team': opportunities[0]['away_team'],
-                'match_date': opportunities[0]['match_date'],
-                'match_time': opportunities[0]['match_time']
+            logger.info(f"Analisando: {home_team['name']} vs {away_team['name']}")
+            
+            # Verificar se é um dos 3 grandes (com verificação defensiva)
+            big_three = getattr(config, 'BIG_THREE', ['Benfica', 'Porto', 'Sporting CP'])
+            is_big_game = any(
+                bt.lower() in home_team['name'].lower() or bt.lower() in away_team['name'].lower()
+                for bt in big_three
+            )
+            
+            if not is_big_game:
+                logger.info(
+                    f"Jogo ignorado (não envolve os 3 grandes): {home_team['name']} vs {away_team['name']}"
+                )
+                return []
+            
+            # Obter dados das equipas
+            home_data = await self._get_team_data(home_team['id'], home_team['name'])
+            away_data = await self._get_team_data(away_team['id'], away_team['name'])
+            
+            # Obter contexto do jogo
+            context = await self._get_match_context(home_team['id'], away_team['id'])
+            
+            # Calcular probabilidades usando ELO como base
+            elo_home = home_data.get('elo_rating', 1500)
+            elo_away = away_data.get('elo_rating', 1500)
+            
+            # Probabilidades básicas usando diferença ELO
+            elo_diff = elo_home - elo_away + 100  # vantagem casa
+            prob_home = 1 / (1 + 10 ** (-elo_diff / 400))
+            prob_away = 1 / (1 + 10 ** (elo_diff / 400))
+            prob_draw = max(0.01, 1 - prob_home - prob_away)
+            
+            # Normalizar probabilidades
+            total_prob = prob_home + prob_draw + prob_away
+            prob_home /= total_prob
+            prob_draw /= total_prob
+            prob_away /= total_prob
+            
+            model_probs = {
+                'home_win': max(0.05, min(0.85, prob_home)),
+                'draw': max(0.05, min(0.6, prob_draw)),
+                'away_win': max(0.05, min(0.85, prob_away)),
+                'over_25': 0.55,  # valores padrão até integração completa
+                'under_25': 0.45,
+                'btts_yes': 0.6,
+                'btts_no': 0.4
             }
             
-            # Enviar resumo do jogo
-            await telegram_service.send_match_analysis_summary(match_data, opportunities)
-            await asyncio.sleep(3)
+            # Simular odds de mercado
+            market_odds = self._simulate_market_odds(model_probs)
             
-            # Enviar detalhes da melhor oportunidade
-            best_opportunity = max(opportunities, key=lambda x: x['confidence'])
-            await telegram_service.send_fair_odds_alert(best_opportunity)
-            await asyncio.sleep(3)
-        
-        # Resumo geral
-        avg_confidence = sum(opp['confidence'] for opp in all_opportunities) / len(all_opportunities)
-        await telegram_service.send_daily_summary({
-            'matches_analyzed': len(games_with_opportunities),
-            'value_bets_found': len(all_opportunities),
-            'avg_confidence': avg_confidence * 100,
-            'focus': '3 Grandes + Odds Justas'
-        })
-        
-    except Exception as e:
-        logger.error(f"Erro ao enviar resultados: {e}")
-
+            # Dados do fixture para o value_detector
+            fixture_data = {
+                'fixture_id': fixture_id,
+                'home_team': home_team['name'],
+                'away_team': away_team['name'],
+                'match_date': fixture['fixture']['date'][:10],
+                'match_time': fixture['fixture']['date'][11:16],
+                'context': context
+            }
+            
+            # Encontrar value bets
+            value_bets = value_detector.find_value_bets(
+                model_probs=model_probs,
+                market_odds=market_odds,
+                fixture_data=fixture_data
+            )
+            
+            return value_bets or []
+            
+        except Exception as e:
+            logger.error(f"Erro ao analisar jogo individual: {e}")
+            logger.error(traceback.format_exc())
+            return []
     
     async def _get_team_data(self, team_id: int, team_name: str) -> Dict:
         """Obtém dados de uma equipa"""
@@ -136,7 +179,7 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
             if not team:
                 team = Team(
                     api_id=team_id,
-                    name=team_name,
+                    name=team_name or f"Team {team_id}",
                     elo_rating=1500.0,
                     attack_home=1.0,
                     attack_away=1.0,
@@ -155,6 +198,18 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
                 'attack_away': team.attack_away,
                 'defense_home': team.defense_home,
                 'defense_away': team.defense_away
+            }
+        except Exception as e:
+            logger.error(f"Erro ao obter dados da equipa {team_id}: {e}")
+            # Retornar dados padrão em caso de erro
+            return {
+                'id': team_id,
+                'name': team_name or f"Team {team_id}",
+                'elo_rating': 1500.0,
+                'attack_home': 1.0,
+                'attack_away': 1.0,
+                'defense_home': 1.0,
+                'defense_away': 1.0
             }
         finally:
             db.close()
@@ -185,8 +240,9 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
                 context['opponent_strength'] = 'strong'
             
             # Verificar se é equipa grande (europeia)
-            home_team = await self._get_team_data(home_team_id, "")
-            if any(big_team in home_team['name'] for big_team in config.BIG_THREE):
+            big_three = getattr(config, 'BIG_THREE', ['Benfica', 'Porto', 'Sporting CP'])
+            home_team_data = await self._get_team_data(home_team_id, "")
+            if any(bt.lower() in home_team_data['name'].lower() for bt in big_three):
                 context['european_midweek'] = True
                 context['days_rest'] = 3
             
@@ -221,19 +277,33 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
         db = next(get_db())
         try:
             for bet in value_bets:
+                # Verificar se já existe para evitar duplicatas
+                existing_bet = db.query(ValueBet).filter(
+                    ValueBet.match_api_id == bet['fixture_id'],
+                    ValueBet.market == bet['market']
+                ).first()
+                
+                if existing_bet:
+                    continue
+                
+                # Tratar diferentes formatos de edge
+                edge_value = bet.get('edge', bet.get('edge_pct', 0))
+                if isinstance(edge_value, (int, float)) and edge_value > 1:
+                    edge_value = edge_value / 100.0  # Converter percentagem para decimal
+                
                 value_bet = ValueBet(
                     match_api_id=bet['fixture_id'],
                     home_team_name=bet['home_team'],
                     away_team_name=bet['away_team'],
                     match_date=datetime.strptime(bet['match_date'], '%Y-%m-%d'),
                     market=bet['market'],
-                    odds=bet['odds'],
-                    model_prob=bet['model_prob'],
-                    market_prob=bet['market_prob'],
-                    edge=bet['edge'],
-                    confidence=bet['confidence'],
-                    stake_amount=bet['stake_amount'],
-                    expected_value=bet['expected_value'],
+                    odds=bet.get('odds', 0.0),
+                    model_prob=bet.get('model_prob', 0.0),
+                    market_prob=bet.get('market_prob', 0.0),
+                    edge=edge_value,
+                    confidence=bet.get('confidence', 0.0),
+                    stake_amount=bet.get('stake_amount', 0.0),
+                    expected_value=bet.get('expected_value', 0.0),
                     pattern_type=bet.get('pattern_type'),
                     pattern_explanation=bet.get('pattern_explanation')
                 )
@@ -244,6 +314,7 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
             
         except Exception as e:
             logger.error(f"Erro ao salvar value bets: {e}")
+            logger.error(traceback.format_exc())
             db.rollback()
         finally:
             db.close()
@@ -259,8 +330,15 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
                 })
                 return
             
-            # Enviar resumo
-            avg_edge = sum(bet['edge_pct'] for bet in value_bets) / len(value_bets)
+            # Calcular média de edge (tratando diferentes formatos)
+            edges = []
+            for bet in value_bets:
+                edge = bet.get('edge', bet.get('edge_pct', 0))
+                if isinstance(edge, (int, float)):
+                    edges.append(edge if edge <= 1 else edge / 100.0)
+            
+            avg_edge = (sum(edges) / len(edges) * 100) if edges else 0
+            
             await telegram_service.send_daily_summary({
                 'matches_analyzed': matches_analyzed,
                 'value_bets_found': len(value_bets),
@@ -290,6 +368,7 @@ async def _send_analysis_results(self, matches_analyzed: int, all_opportunities:
                 
         except Exception as e:
             logger.error(f"Erro ao enviar resultados: {e}")
+            logger.error(traceback.format_exc())
 
 # Instância global do bot
 bot = PrimeiraLigaBot()
@@ -342,12 +421,12 @@ async def root():
     """
 
 @app.get("/analyze")
-async def manual_analysis(background_tasks: BackgroundTasks):
+async def manual_analysis():
     """Trigger análise manual"""
     if bot.is_running:
         return {"message": "Análise já em execução", "status": "running"}
     
-    background_tasks.add_task(bot.analyze_matches)
+    asyncio.create_task(bot.analyze_matches())
     return {"message": "Análise iniciada em background", "status": "started"}
 
 @app.get("/status")
@@ -435,8 +514,6 @@ async def shutdown():
     scheduler.shutdown()
     logger.info("Bot desligado")
     await telegram_service.send_system_status("offline", "🔴 Bot desligado")
-
-# ... (todo o código existente do app.py permanece igual) ...
 
 if __name__ == "__main__":
     import os
