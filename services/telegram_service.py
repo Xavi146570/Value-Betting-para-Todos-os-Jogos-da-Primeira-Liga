@@ -100,125 +100,103 @@ class TelegramService:
         
         return await self._send_with_retry(send_func)
     
-    async def send_value_bet_alert(self, value_bet: Dict) -> bool:
-        """Envia alerta de value bet formatado"""
-        
-        pattern_emojis = {
-            'Dominancia_Hierarquica': '👑',
-            'Ressaca_Europeia': '😴',
-            'Fortaleza_Caseira': '🏠',
-            'Caos_Meio_Tabela': '⚡',
-            'Fortaleza_Defensiva': '🛡️'
-        }
-        
-        market_names = {
-            'home_win': 'Vitória Casa (1)',
-            'draw': 'Empate (X)',
-            'away_win': 'Vitória Fora (2)',
-            'over_25': 'Over 2.5 Golos',
-            'under_25': 'Under 2.5 Golos',
-            'btts_yes': 'Ambas Marcam - Sim',
-            'btts_no': 'Ambas Marcam - Não',
-            'ah_home_minus_15': 'AH Casa -1.5',
-            'ah_away_plus_15': 'AH Fora +1.5',
-            'ah_home_minus_125': 'AH Casa -1.25',
-            'ah_away_plus_125': 'AH Fora +1.25'
-        }
-        
-        pattern_emoji = pattern_emojis.get(value_bet.get('pattern_type', ''), '🎯')
-        market_display = market_names.get(value_bet.get('market', ''), 
-                                        value_bet.get('market', '').replace('_', ' ').title())
-        
-        # Calcular ROI potencial
-        roi_potential = ((value_bet.get('odds', 1) - 1) * value_bet.get('model_prob', 0) - 
-                        (1 - value_bet.get('model_prob', 0))) * 100
-        
-        message = f"""
-{pattern_emoji} <b>VALUE BET DETECTADO</b> 🎯
-
-🏆 <b>{value_bet.get('home_team', 'N/A')} vs {value_bet.get('away_team', 'N/A')}</b>
-📅 <b>Data:</b> {value_bet.get('match_date', 'N/A')} às {value_bet.get('match_time', 'N/A')}
-
-💰 <b>Mercado:</b> {market_display}
-📊 <b>Odds:</b> {value_bet.get('odds', 0):.2f}
-📈 <b>Edge:</b> +{value_bet.get('edge_pct', 0):.2f}%
-🎯 <b>Confiança:</b> {value_bet.get('confidence', 0)*100:.0f}%
-
-💵 <b>Stake Sugerido:</b> €{value_bet.get('stake_amount', 0):.0f} ({value_bet.get('stake_pct', 0):.2f}%)
-💎 <b>Expected Value:</b> €{value_bet.get('expected_value', 0):.2f}
-📊 <b>ROI Esperado:</b> {roi_potential:.1f}%
-
-🔍 <b>Padrão:</b> {value_bet.get('pattern_type', 'Análise Estatística').replace('_', ' ')}
-💡 <b>Explicação:</b> {value_bet.get('pattern_explanation', 'Value identificado por análise estatística')[:200]}
-
-⚠️ <i>Verificar odds atuais antes de apostar</i>
-🤖 <i>Bot Primeira Liga - Análise Automática</i>
-        """
-        
-        return await self.send_message(message.strip())
+    async def send_fair_odds_alert(self, opportunity: Dict) -> bool:
+    """Envia análise de odds justas para jogos dos 3 grandes"""
     
-    async def send_daily_summary(self, summary: Dict) -> bool:
-        """Envia resumo diário das análises"""
-        
-        # Emojis baseados no número de value bets
-        if summary['value_bets_found'] == 0:
-            status_emoji = '😴'
-            status_text = 'Nenhuma oportunidade'
-        elif summary['value_bets_found'] <= 2:
-            status_emoji = '🔍'
-            status_text = 'Poucas oportunidades'
-        elif summary['value_bets_found'] <= 5:
-            status_emoji = '🎯'
-            status_text = 'Boas oportunidades'
-        else:
-            status_emoji = '🚀'
-            status_text = 'Muitas oportunidades'
-        
-        message = f"""
-📊 <b>RESUMO DIÁRIO - PRIMEIRA LIGA</b> {status_emoji}
-
-📈 <b>Status:</b> {status_text}
-🔍 <b>Jogos Analisados:</b> {summary['matches_analyzed']}
-🎯 <b>Value Bets Encontrados:</b> {summary['value_bets_found']}
-📊 <b>Edge Médio:</b> +{summary['avg_edge']:.2f}%
-📅 <b>Data:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}
-
-🏆 <b>Liga:</b> Primeira Liga {config.SEASON}
-💰 <b>Bankroll:</b> €{config.BANKROLL:,.0f}
-📈 <b>Edge Mínimo:</b> {config.MIN_EDGE*100}%
-
-🤖 <i>Bot Primeira Liga - Análise Automática</i>
-        """
-        
-        return await self.send_message(message.strip())
+    pattern_emojis = {
+        'Dominancia_Hierarquica': '👑',
+        'Ressaca_Europeia': '😴', 
+        'Fortaleza_Defensiva': '🛡️',
+        'Fortaleza_Caseira': '🏠',
+        'Caos_Meio_Tabela': '⚡'
+    }
     
-    async def send_system_status(self, status: str, details: str = "") -> bool:
-        """Envia status do sistema"""
-        
-        status_emojis = {
-            'online': '🟢',
-            'offline': '🔴',
-            'error': '⚠️',
-            'erro': '⚠️',
-            'warning': '🟡',
-            'analyzing': '🔄'
-        }
-        
-        emoji = status_emojis.get(status.lower(), '📊')
-        
-        message = f"""
-{emoji} <b>STATUS DO SISTEMA</b>
+    emoji = pattern_emojis.get(opportunity.get('pattern_type', ''), '🎯')
+    
+    # Identificar qual grande está a jogar
+    home_team = opportunity.get('home_team', '')
+    away_team = opportunity.get('away_team', '')
+    
+    big_team = "N/A"
+    for big in ['Benfica', 'Porto', 'Sporting']:
+        if any(big_name in home_team for big_name in [big, f'SL {big}', f'FC {big}', f'{big} CP']):
+            big_team = big
+            break
+        elif any(big_name in away_team for big_name in [big, f'SL {big}', f'FC {big}', f'{big} CP']):
+            big_team = big
+            break
+    
+    message = f"""
+{emoji} <b>ANÁLISE DOS 3 GRANDES</b> 🏆
 
-📊 <b>Estado:</b> {status.upper()}
-📅 <b>Timestamp:</b> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-🏆 <b>Liga:</b> Primeira Liga {config.SEASON}
+⚽ <b>{home_team} vs {away_team}</b>
+📅 <b>Data:</b> {opportunity.get('match_date', 'N/A')} às {opportunity.get('match_time', 'N/A')}
+⭐ <b>Grande:</b> {big_team}
 
-{details}
+💡 <b>MERCADO ANALISADO</b>
+💰 <b>Mercado:</b> {opportunity['market_name']}
+🎯 <b>Probabilidade Modelo:</b> {opportunity['probability_pct']}%
+📊 <b>Odd Justa:</b> {opportunity['fair_odds']}
+🔥 <b>Confiança:</b> {opportunity['confidence']*100:.0f}%
 
-🤖 <i>Bot Primeira Liga</i>
+🔍 <b>Padrão:</b> {opportunity['pattern_type'].replace('_', ' ')}
+💡 <b>Explicação:</b> {opportunity.get('pattern_explanation', '')[:120]}
+
+⚠️ <b>INSTRUÇÕES DE TRADING:</b>
+{opportunity.get('bet_instruction', 'Verificar odds de mercado')}
+📊 <b>Referência:</b> Odd Justa = {opportunity['fair_odds']}
+
+🤖 <i>Bot Primeira Liga - Foco nos Grandes</i>
         """
-        
-        return await self.send_message(message.strip())
+    
+    return await self.send_message(message.strip())
+
+async def send_match_analysis_summary(self, match_data: Dict, opportunities: List[Dict]) -> bool:
+    """Envia resumo completo do jogo analisado"""
+    
+    if not opportunities:
+        return False
+    
+    home_team = match_data.get('home_team', '')
+    away_team = match_data.get('away_team', '')
+    main_pattern = opportunities[0].get('pattern_type', '').replace('_', ' ')
+    
+    # Separar por tipo de mercado
+    result_markets = [opp for opp in opportunities if opp['market'] in ['home_win', 'draw', 'away_win']]
+    goal_markets = [opp for opp in opportunities if opp['market'].startswith('over_') or opp['market'].startswith('under_')]
+    
+    message = f"""
+📊 <b>RESUMO - JOGO DOS GRANDES</b>
+
+🏆 <b>{home_team} vs {away_team}</b>
+📅 {match_data.get('match_date', 'N/A')} às {match_data.get('match_time', 'N/A')}
+🔍 <b>Padrão:</b> {main_pattern}
+
+📈 <b>MERCADOS COM ODDS JUSTAS:</b>
+"""
+    
+    # Resultado final
+    if result_markets:
+        message += "\n🎯 <b>Resultado Final (1X2):</b>"
+        for opp in result_markets:
+            message += f"\n• {opp['market_name']}: Fair {opp['fair_odds']} ({opp['probability_pct']}%)"
+    
+    # Over/Under golos
+    if goal_markets:
+        message += "\n\n⚽ <b>Totais de Golos:</b>"
+        for opp in goal_markets:
+            message += f"\n• {opp['market_name']}: Fair {opp['fair_odds']} ({opp['probability_pct']}%)"
+    
+    message += f"""
+
+💡 <b>Compare odds do mercado com valores Fair indicados</b>
+🔥 <b>Confiança Média:</b> {sum(opp['confidence'] for opp in opportunities) / len(opportunities) * 100:.0f}%
+
+🤖 <i>Análise focada nos 3 grandes</i>
+    """
+    
+    return await self.send_message(message.strip())
+
     
     async def send_error_alert(self, error_type: str, error_message: str, 
                               context: Optional[str] = None) -> bool:
