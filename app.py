@@ -440,35 +440,57 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Iniciando sistema...")
     
+  # Configurar scheduler com timezone
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import os
+
+# Criar scheduler com timezone correto
+scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Europe/Lisbon"))
+
+# ... (resto do código permanece igual até ao startup) ...
+
+@app.on_event("startup")
+async def startup():
+    """Configurar análises automáticas - CORRIGIDO"""
+    
+    # ✅ CORREÇÃO PRINCIPAL: Agendar diretamente a coroutine (sem lambda/create_task)
     scheduler.add_job(
-        lambda: asyncio.create_task(bot.analyze_matches()),
+        bot.analyze_matches,  # Diretamente a função async (sem lambda)
         CronTrigger(hour=9, minute=0),
         id='morning_analysis',
+        replace_existing=True,
+        coalesce=True,
         misfire_grace_time=300
     )
     
     scheduler.add_job(
-        lambda: asyncio.create_task(bot.analyze_matches()),
+        bot.analyze_matches,  # Diretamente a função async (sem lambda)
         CronTrigger(hour=18, minute=0),
         id='evening_analysis',
+        replace_existing=True,
+        coalesce=True,
         misfire_grace_time=300
     )
     
+    # Iniciar scheduler DEPOIS de configurar jobs
     scheduler.start()
-    logger.info("🚀 Bot iniciado com análises automáticas às 09:00 e 18:00")
     
+    logger.info("🚀 Bot iniciado com análises automáticas às 09:00 e 18:00 (Europe/Lisbon)")
+    
+    # Enviar mensagem de inicialização
     await telegram_service.send_system_status(
         "online", 
-        f"🚀 Bot iniciado com sucesso!\n📊 Análises automáticas: 09:00 e 18:00\n🏆 Liga: {getattr(config, 'LEAGUE_ID', 'N/A')} | Época: {getattr(config, 'SEASON', 'N/A')}"
+        f"🚀 Bot iniciado com sucesso!\n📊 Análises automáticas: 09:00 e 18:00\n🏆 Foco: Apenas 3 Grandes\n📊 Liga: {config.LEAGUE_ID} | Época: {config.SEASON}"
     )
-    
-    yield
-    
-    # Shutdown
-    scheduler.shutdown()
-    logger.info("🔴 Bot desligado")
-    await telegram_service.send_system_status("offline", "🔴 Bot desligado")
 
+@app.on_event("shutdown")
+async def shutdown():
+    """Cleanup ao desligar"""
+    scheduler.shutdown(wait=False)
+    logger.info("Bot desligado")
+    await telegram_service.send_system_status("offline", "🔴 Bot desligado")
+  
 # Aplicar lifespan ao FastAPI
 app = FastAPI(
     title="Primeira Liga Value Bot", 
