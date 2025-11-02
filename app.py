@@ -449,6 +449,14 @@ import os
 scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Europe/Lisbon"))
 
 # ... (resto do código permanece igual até ao startup) ...
+from fastapi import FastAPI
+
+app = FastAPI(title="PrimeiraLigaBot", version="1.0.0")
+
+# Agora podes usar os decorators
+@app.on_event("startup")
+async def startup_event():
+    print("🏆 PrimeiraLigaBot inicializado com sucesso")
 
 @app.on_event("startup")
 async def startup():
