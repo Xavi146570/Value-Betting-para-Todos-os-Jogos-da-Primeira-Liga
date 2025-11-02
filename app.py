@@ -434,19 +434,45 @@ class PrimeiraLigaBot:
 # Instância global do bot
 bot = PrimeiraLigaBot()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Gestão moderna do ciclo de vida da aplicação"""
-    # Startup
-    logger.info("🚀 Iniciando sistema...")
-    
-  # Configurar scheduler com timezone
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import os
+import logging
 
-# Criar scheduler com timezone correto
-scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Europe/Lisbon"))
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gestão moderna do ciclo de vida da aplicação"""
+    # ✅ STARTUP - Inicialização
+    logger.info("🚀 Iniciando sistema...")
+    
+    # Configurar scheduler com timezone
+    scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Europe/Lisbon"))
+    
+    # Armazenar scheduler no estado da app
+    app.state.scheduler = scheduler
+    
+    # Iniciar scheduler
+    scheduler.start()
+    logger.info(f"⏰ Scheduler iniciado com timezone: {scheduler.timezone}")
+    logger.info("🏆 PrimeiraLigaBot inicializado com sucesso")
+    
+    yield  # ✅ OBRIGATÓRIO - Separa startup de shutdown
+    
+    # ✅ SHUTDOWN - Limpeza
+    logger.info("🔄 Encerrando sistema...")
+    
+    # Parar scheduler de forma limpa
+    if hasattr(app.state, 'scheduler'):
+        app.state.scheduler.shutdown(wait=True)
+        logger.info("⏰ Scheduler encerrado com segurança")
+    
+    logger.info("✅ Sistema encerrado com sucesso")
+
+app = FastAPI(title="PrimeiraLigaBot", lifespan=lifespan)
 
 # ... (resto do código permanece igual até ao startup) ...
 from fastapi import FastAPI
