@@ -7,6 +7,8 @@ class Config:
     # API Football
     API_FOOTBALL_KEY = os.getenv('API_FOOTBALL_KEY')
     API_FOOTBALL_URL = 'https://v3.football.api-sports.io'
+    # Timezone para scheduler
+    TIMEZONE = os.getenv('TZ', 'Europe/Lisbon')
     
     # Telegram
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
